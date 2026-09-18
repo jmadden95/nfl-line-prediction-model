@@ -1,0 +1,22 @@
+# NFL Line Predictor — sibling of nrl-line, behind the existing Caddy.
+#   docker compose up -d --build
+services:
+  nfl-line:
+    build: .
+    container_name: nfl-line
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Australia/Sydney
+    volumes:
+      - ./data:/app/data            # xlsx, nfl.db, odds cache, nflverse csv
+    expose:
+      - "8000"                      # Caddy proxies http://nfl-line:8000
+    networks:
+      - caddy
+    labels:
+      - "diun.enable=false"
+
+networks:
+  caddy:
+    external: true

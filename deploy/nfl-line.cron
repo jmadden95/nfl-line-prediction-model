@@ -1,0 +1,28 @@
+# NFL line model — host cron (host clock is UTC). Install:
+#   sudo cp deploy/nfl-line.cron /etc/cron.d/nfl-line && sudo chmod 644 /etc/cron.d/nfl-line && sudo service cron reload
+# The NFL week (US time): lines open Sun night/Mon; practice reports Wed-Fri; games Thu night, Sun, Mon night.
+SHELL=/bin/sh
+PATH=/usr/bin:/bin
+#  m  h   dom mon dow  user  command
+# --- AU + sharp line snapshots (6 Odds-API credits each with au,eu x 3 markets)
+   0 14   *   *   2    root  docker exec nfl-line python -m src.poll_odds --phase open     >> /var/log/nfl-line.log 2>&1
+   0  0   *   *   5    root  docker exec nfl-line python -m src.poll_odds --phase mid      >> /var/log/nfl-line.log 2>&1
+   0  2   *   *   6    root  docker exec nfl-line python -m src.poll_odds --phase late     >> /var/log/nfl-line.log 2>&1
+   0 15   *   *   0    root  docker exec nfl-line python -m src.poll_odds --phase pre_kick >> /var/log/nfl-line.log 2>&1
+# --- kickoff-timed close (~10 min pre-KO). Every 5 min in the game windows; cache-gated so
+#     only a real due game costs credits. Thu night (00:15Z Fri), Sunday slate (17:00Z-01:30Z), Mon night (00:15Z Tue).
+ */5  23-23 *   *   4    root  docker exec nfl-line python -m src.poll_kickoff >> /var/log/nfl-line.log 2>&1
+ */5  0-1   *   *   5    root  docker exec nfl-line python -m src.poll_kickoff >> /var/log/nfl-line.log 2>&1
+ */5  16-23 *   *   0    root  docker exec nfl-line python -m src.poll_kickoff >> /var/log/nfl-line.log 2>&1
+ */5  0-1   *   *   1    root  docker exec nfl-line python -m src.poll_kickoff >> /var/log/nfl-line.log 2>&1
+ */5  23-23 *   *   1    root  docker exec nfl-line python -m src.poll_kickoff >> /var/log/nfl-line.log 2>&1
+ */5  0-1   *   *   2    root  docker exec nfl-line python -m src.poll_kickoff >> /var/log/nfl-line.log 2>&1
+# --- injuries (ESPN, free): daily + after the Friday report + Sunday inactives (~90 min pre-kick)
+   0 12   *   *   *    root  docker exec nfl-line python -m src.injuries >> /var/log/nfl-line.log 2>&1
+   0 23   *   *   5    root  docker exec nfl-line python -m src.injuries >> /var/log/nfl-line.log 2>&1
+  30 15   *   *   0    root  docker exec nfl-line python -m src.injuries >> /var/log/nfl-line.log 2>&1
+# --- results (ESPN, free): after Thu/Sun/Mon games
+   0  6   *   *   2,5,1 root  docker exec nfl-line python -m src.poll_results >> /var/log/nfl-line.log 2>&1
+# --- nflverse schedule/QB refresh (free) weekly Tuesday
+   0 13   *   *   2    root  docker exec nfl-line python -m src.nflverse_sync >> /var/log/nfl-line.log 2>&1
+# Budget: 4 phase polls + ~3 kickoff captures/week x 6 credits ~= 180/month, plus page-cache misses.
