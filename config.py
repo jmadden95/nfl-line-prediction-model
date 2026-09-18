@@ -97,7 +97,9 @@ NON_QB_STARTER_PROB = 0.7
 
 # --- Modelling constants ---------------------------------------------------
 MARKET_BLEND = 0.5          # displayed line = 0.5*model + 0.5*AU line (as NRL)
-SIGNAL_EDGE = 2.0           # |blended edge| (pts) to flag a bet; re-sweep in backtest
+SIGNAL_EDGE = 2.0           # |blended edge| (pts) to flag a handicap bet; re-sweep in backtest
+TOTAL_SIGNAL = 3.0          # |model total - AU total| (pts) to flag an over/under
+TOTAL_LAG_MIN = 1.5         # AU total vs sharp total gap (pts) that flags a soft total
 RANDOM_SEED = 42
 TEST_SEASONS = [2025]       # NFL season = the year it STARTS (2025 = Sep 2025-Feb 2026)
 TRAIN_FROM_SEASON = 2008    # 2 warm-up seasons for form/Elo before training rows

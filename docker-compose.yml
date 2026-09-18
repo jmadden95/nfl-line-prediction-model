@@ -10,6 +10,7 @@ services:
       - TZ=Australia/Sydney
     volumes:
       - ./data:/app/data            # xlsx, nfl.db, odds cache, nflverse csv
+      - /docker/_shared/bankroll:/app/data/shared   # ONE bankroll shared with nrl-line
     expose:
       - "8000"                      # Caddy proxies http://nfl-line:8000
     networks:

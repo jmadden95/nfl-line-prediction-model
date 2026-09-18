@@ -26,3 +26,5 @@ PATH=/usr/bin:/bin
 # --- nflverse schedule/QB refresh (free) weekly Tuesday
    0 13   *   *   2    root  docker exec nfl-line python -m src.nflverse_sync >> /var/log/nfl-line.log 2>&1
 # Budget: 4 phase polls + ~3 kickoff captures/week x 6 credits ~= 180/month, plus page-cache misses.
+# --- daily bankroll snapshot (total = unstaked + open stakes) 13:00 UTC
+   0 13   *   *   *    root  docker exec nfl-line python -m src.bankroll >> /var/log/nfl-line.log 2>&1

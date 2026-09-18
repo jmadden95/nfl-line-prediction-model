@@ -26,7 +26,7 @@ from config import DATA_DIR, RAW_XLSX, LOCAL_TZ
 DB_PATH = DATA_DIR / "nfl.db"
 OUT_COLUMNS = ["entered", "weeks", "team", "player", "position", "points", "kind", "source", "note"]
 BET_COLUMNS = ["logged", "gdate", "home", "away", "side", "team", "line", "odds", "stake",
-               "book", "home_score", "away_score", "close_line", "result", "profit"]
+               "book", "home_score", "away_score", "close_line", "result", "profit", "model"]
 
 
 def connect() -> sqlite3.Connection:
@@ -62,7 +62,7 @@ _SCHEMA = {
                    "points REAL, kind TEXT, source TEXT, note TEXT",
     "bets": "logged TEXT, gdate TEXT, home TEXT, away TEXT, side TEXT, team TEXT, line REAL, "
             "odds REAL, stake REAL, book TEXT, home_score REAL, away_score REAL, "
-            "close_line REAL, result TEXT, profit REAL",
+            "close_line REAL, result TEXT, profit REAL, model TEXT",
     "odds_snapshots": "captured_ts TEXT, captured_date TEXT, phase TEXT, game_date TEXT, "
                       "kickoff TEXT, home TEXT, away TEXT, au_point REAL, au_home_odds REAL, "
                       "au_away_odds REAL, au_h2h_home REAL, au_h2h_away REAL, au_total REAL, "
@@ -73,11 +73,13 @@ _SCHEMA = {
                   "h2h_home REAL, h2h_away REAL, tot_point REAL, tot_over REAL, tot_under REAL",
     "predictions": "captured_date TEXT, captured_ts TEXT, phase TEXT, game_date TEXT, home TEXT, "
                    "away TEXT, model TEXT, pred_margin REAL, edge REAL, au_point REAL, "
-                   "sharp_point REAL, win_prob REAL, out_diff REAL, backup_qb_diff REAL",
+                   "sharp_point REAL, win_prob REAL, out_diff REAL, backup_qb_diff REAL, "
+                   "pred_total REAL, au_total REAL, sharp_total REAL",
     "model_coeffs": "captured_date TEXT, feature TEXT, coef REAL",
     "sent_alerts": "key TEXT PRIMARY KEY, sent_ts TEXT",
     "api_usage": "checked_at TEXT, used INTEGER, remaining INTEGER, last INTEGER",
     "kv": "key TEXT PRIMARY KEY, value TEXT",
+    "bankroll_history": "date TEXT PRIMARY KEY, total REAL, unstaked REAL, pending REAL, realized REAL",
     "injury_log": "captured_ts TEXT, team TEXT, player TEXT, position TEXT, status TEXT, "
                   "detail TEXT, entered TEXT",
 }
@@ -88,6 +90,14 @@ def init_db() -> None:
     try:
         for t, ddl in _SCHEMA.items():
             conn.execute(f'CREATE TABLE IF NOT EXISTS "{t}" ({ddl})')
+        # migrations for tables created before a column existed
+        cols = {r[1] for r in conn.execute('PRAGMA table_info("bets")')}
+        if cols and "model" not in cols:
+            conn.execute('ALTER TABLE bets ADD COLUMN model TEXT')
+        pcols = {r[1] for r in conn.execute('PRAGMA table_info("predictions")')}
+        for c in ("pred_total", "au_total", "sharp_total"):
+            if pcols and c not in pcols:
+                conn.execute(f'ALTER TABLE predictions ADD COLUMN {c} REAL')
         _ensure_matches_current(conn)
         conn.commit()
     finally:
@@ -351,11 +361,12 @@ def snapshot_predictions(up: pd.DataFrame, phase: str = "page") -> int:
             if conn.execute("SELECT 1 FROM predictions WHERE captured_date=? AND game_date=? AND home=? "
                             "AND away=? AND model='blend'", (today, gd, r["Home Team"], r["Away Team"])).fetchone():
                 continue
-            conn.execute("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            conn.execute("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (today, _now_iso(), phase, gd, r["Home Team"], r["Away Team"], "blend",
                           _f(r.get("pred_margin")), _f(r.get("edge")), _f(r.get("au_point")),
                           _f(r.get("sharp_point")), _f(r.get("home_win_prob")),
-                          _f(r.get("player_out_diff")), _f(r.get("backup_qb_diff"))))
+                          _f(r.get("player_out_diff")), _f(r.get("backup_qb_diff")),
+                          _f(r.get("pred_total")), _f(r.get("au_total")), _f(r.get("sharp_total"))))
             n += 1
         conn.commit()
     finally:

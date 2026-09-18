@@ -12,8 +12,10 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 
 from config import (DATA_DIR, LOCAL_TZ, MARKET_BLEND, NFLVERSE_GAMES_CSV, NTFY_TOPIC, NTFY_URL,
                     ODDS_API_KEY, ODDS_MARKETS, ODDS_REGIONS, POSITION_POINTS, RAW_XLSX,
-                    SHARP_LAG_MIN, SIGNAL_EDGE)
+                    SHARP_LAG_MIN, SIGNAL_EDGE, TOTAL_LAG_MIN, TOTAL_SIGNAL)
 from src import db
+from src import bankroll as bk
+from src.bets import settle_bets, signal_scorecards, tally
 from src.live import cache_age_seconds, fetch_odds, mock_events, predict_upcoming
 from src.teams import TEAMS, canon_team, short
 from src.win_prob import cover_prob
@@ -21,6 +23,7 @@ from src.win_prob import cover_prob
 app = Flask(__name__)
 SHOW_DAYS = 8
 MARGIN_COVER_STD = 20.0      # betting sigma for edge -> cover prob (wider than raw 14.6; NRL used 22 on 18.4)
+TOTAL_COVER_STD = 18.0       # same idea for totals (NFL totals residual sd ~13.5; widened for edge noise)
 
 try:
     db.init_db()
@@ -94,6 +97,17 @@ def _au_shop(books, side_home: bool):
     return sorted(rows, key=lambda x: (-x["point"], -(x["price"] or 0)))
 
 
+def _au_shop_totals(books, over: bool):
+    """AU books' total for one side; best first (over: lowest line then price; under: highest)."""
+    rows = []
+    for b in books or []:
+        if b.get("region") != "au" or b.get("tot_point") is None:
+            continue
+        rows.append({"book": b["title"], "point": float(b["tot_point"]),
+                     "price": b.get("tot_over") if over else b.get("tot_under")})
+    return sorted(rows, key=lambda x: ((x["point"] if over else -x["point"]), -(x["price"] or 0)))
+
+
 def _line_history(gd, home, away):
     snaps = db.odds_snapshots_df()
     if not len(snaps):
@@ -101,45 +115,6 @@ def _line_history(gd, home, away):
     g = snaps[(snaps["game_date"] == gd) & (snaps["home"] == home) & (snaps["away"] == away)]
     return [{"phase": s["phase"], "ts": str(s["captured_ts"])[5:16].replace("T", " "),
              "au": s["au_point"], "sharp": s["sharp_point"]} for _, s in g.sort_values("captured_ts").iterrows()]
-
-
-def _settle_bets(bets: pd.DataFrame) -> pd.DataFrame:
-    """Fill result/profit from known scores; close_line from the kickoff snapshot."""
-    if not len(bets):
-        return bets
-    from src.load_data import load_raw
-    try:
-        m = load_raw()
-    except Exception:  # noqa: BLE001
-        return bets
-    m = m.dropna(subset=["Home Score", "Away Score"])
-    key = {(str(d.date()), h, a): (hs, as_) for d, h, a, hs, as_ in
-           zip(m["Date"], m["Home Team"], m["Away Team"], m["Home Score"], m["Away Score"])}
-    snaps = db.odds_snapshots_df()
-    for i, b in bets.iterrows():
-        if b.get("result") in ("W", "L", "P"):
-            continue
-        sc = key.get((str(b["gdate"])[:10], b["home"], b["away"]))
-        if sc is None:
-            continue
-        hs, as_ = sc
-        margin = hs - as_ if b["side"] == "home" else as_ - hs
-        res = margin + float(b["line"])
-        result = "W" if res > 0 else ("L" if res < 0 else "P")
-        odds = float(b["odds"] or 1.909)
-        stake = float(b["stake"] or 0)
-        profit = stake * (odds - 1) if result == "W" else (-stake if result == "L" else 0.0)
-        close = None
-        if len(snaps):
-            k = snaps[(snaps["game_date"] == str(b["gdate"])[:10]) & (snaps["home"] == b["home"])
-                      & (snaps["away"] == b["away"])].sort_values("captured_ts")
-            if len(k):
-                cp = k.iloc[-1]["au_point"]
-                close = cp if b["side"] == "home" else (-cp if cp is not None else None)
-        db.update_bet(int(b["rowid"]), home_score=hs, away_score=as_, result=result, profit=profit,
-                      close_line=close)
-        bets.loc[i, ["home_score", "away_score", "result", "profit", "close_line"]] = [hs, as_, result, profit, close]
-    return bets
 
 
 def _status():
@@ -206,6 +181,12 @@ def get_board(force_fresh: bool = False):
     except Exception:  # noqa: BLE001
         pass
     horizon = _now() + pd.Timedelta(days=SHOW_DAYS)
+    bank = None
+    try:
+        bank = bk.current()
+    except Exception:  # noqa: BLE001
+        bank = None
+    bank_total = bank["total"] if bank else None
     cards = []
     for _, r in up.iterrows():
         ko = pd.to_datetime(r["Kickoff"], errors="coerce")
@@ -214,7 +195,44 @@ def get_board(force_fresh: bool = False):
         pick = _pick(r)
         gd = str(pd.Timestamp(r["Date"]).date())
         t_edge = (r["pred_total"] - r["au_total"]) if pd.notna(r.get("au_total")) and pd.notna(r.get("pred_total")) else np.nan
+        soft = _sharp_call(r)
+        books = r.get("books")
+        def _form(side, line, edge_pts, model):
+            shop = _au_shop(books, side == "home")
+            best = shop[0] if shop else None
+            odds = (best["price"] if best and best["price"] else
+                    (r.get("au_home_odds") if side == "home" else r.get("au_away_odds")))
+            odds = float(odds) if odds and pd.notna(odds) else 1.91
+            ev = float(cover_prob(edge_pts, MARGIN_COVER_STD)) * odds - 1.0
+            return {"side": side, "line": float(line), "odds": odds,
+                    "book": (best["book"] if best else (r.get("au_book") or "Sportsbet")),
+                    "stake": bk.kelly_stake(ev, odds, bank_total), "ev": ev, "model": model,
+                    "team": short(r["Home Team"]) if side == "home" else short(r["Away Team"])}
+        pick_form = _form(pick["side"], pick["line"], pick["edge"], "model") if pick else None
+
+        def _tform(over: bool, line, edge_pts, model):
+            shop = _au_shop_totals(books, over)
+            best = shop[0] if shop else None
+            odds = (best["price"] if best and best["price"] else (r.get("au_over") if over else r.get("au_under")))
+            odds = float(odds) if odds and pd.notna(odds) else 1.91
+            ev = float(cover_prob(edge_pts, TOTAL_COVER_STD)) * odds - 1.0
+            return {"side": "over" if over else "under", "line": float(best["point"] if best else line),
+                    "odds": odds, "book": (best["book"] if best else (r.get("au_book") or "Sportsbet")),
+                    "stake": bk.kelly_stake(ev, odds, bank_total), "ev": ev, "model": model,
+                    "team": ("OVER" if over else "UNDER")}
+        tot_pick = tot_form = soft_tot = soft_tot_form = None
+        if pd.notna(t_edge) and abs(t_edge) >= TOTAL_SIGNAL:
+            tot_pick = {"side": "over" if t_edge > 0 else "under", "line": float(r["au_total"]), "edge": abs(float(t_edge))}
+            tot_form = _tform(t_edge > 0, r["au_total"], abs(float(t_edge)), "model_total")
+        tgap = (float(r["au_total"]) - float(r["sharp_total"])) if pd.notna(r.get("au_total")) and pd.notna(r.get("sharp_total")) else np.nan
+        if pd.notna(tgap) and abs(tgap) >= TOTAL_LAG_MIN:
+            soft_tot = {"side": "under" if tgap > 0 else "over", "line": float(r["au_total"]), "gap": abs(tgap)}
+            soft_tot_form = _tform(tgap < 0, r["au_total"], abs(tgap), "soft_total")
+        soft_form = (_form("home" if soft["team"] == short(r["Home Team"]) else "away",
+                           soft["line"], soft["gap"], "soft") if soft else None)
         cards.append({
+            "pick_form": pick_form, "soft_form": soft_form, "tot_pick": tot_pick, "tot_form": tot_form,
+            "soft_tot": soft_tot, "soft_tot_form": soft_tot_form, "sharp_total": r.get("sharp_total"),
             "gd": gd, "kick": ko.strftime("%a %d %b %H:%M") if pd.notna(ko) else "–",
             "home": r["Home Team"], "away": r["Away Team"], "h": short(r["Home Team"]), "a": short(r["Away Team"]),
             "au_book": r.get("au_book") or "AU", "au": _hcap(r["Home Team"], r["Away Team"], r.get("au_point")),
@@ -255,7 +273,7 @@ a{color:var(--acc)}h1{font-size:20px;margin:0}h2{font-size:15px;margin:22px 0 8p
 .pill{font-size:12px;color:var(--mut)}.pill b{color:var(--fg)}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
 .banner{background:#2b2111;border:1px solid var(--warn);padding:8px 12px;border-radius:6px;margin:12px 0}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:10px 0}
-.card.sig{border-color:var(--ok)}.card.zap{border-color:var(--zap)}
+.card.sig{border-color:var(--ok)}.card.tsig{box-shadow:inset 3px 0 0 var(--acc)}.card.zap{border-color:var(--zap)}
 .hdr{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;align-items:baseline}
 .teams{font-size:16px;font-weight:600}.kick{color:var(--mut);font-size:12px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px 14px;margin-top:8px}
@@ -273,6 +291,9 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
 .small{font-size:12px;color:var(--mut)}code{background:#0d1117;padding:1px 4px;border-radius:3px}
 .spark{font-family:ui-monospace,monospace;font-size:12px;color:var(--mut)}
+.quick{background:#0d1117;border:1px dashed var(--line);border-radius:6px;padding:4px 8px;margin-top:6px}
+.bank{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;background:#10181f;border:1px solid #244055;border-radius:8px;padding:8px 12px;margin:10px 0}
+.bank b{font-size:16px}
 </style></head><body><div class="wrap">
 <div class="top">
  <h1>🏈 NFL Line <span class="small">AU book vs sharp vs model</span></h1>
@@ -292,24 +313,49 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
  <form class="inline" method="post" action="{{url_for('run_backtest')}}"><button>Run backtest</button></form>
 </div>
 
-<h2>Board — next {{show_days}} days · bet when |edge| ≥ {{signal}} · soft when AU trails sharp by ≥ {{lag}}</h2>
+<div class="bank">
+ {% if bank %}<span>💰 Bankroll <b>{{'%.2f'|format(bank.total)}}</b></span>
+  <span class="small">= unstaked {{'%.2f'|format(bank.unstaked)}} + pending {{'%.2f'|format(bank.pending)}} ({{bank.n_pending}} open) · since {{bank.anchor_date}}: {{'%+.2f'|format(bank.since_anchor)}}{% if bank.shared %} (shared with NRL · NFL {{'%+.2f'|format(bank.own_since_anchor)}}){% endif %} · peak {{'%.2f'|format(bank.peak)}} · max drawdown {{'%.2f'|format(bank.max_dd)}}</span>
+  {% if bank.spark %}<span class="spark">{{bank.spark}}</span>{% endif %}
+ {% else %}<span class="small">No bankroll set — enter your current unstaked balance to get Kelly stake suggestions.</span>{% endif %}
+ <form class="inline" method="post" action="{{url_for('set_bankroll')}}">unstaked <input name="unstaked" type="number" step="0.01" style="width:90px" value="{{'%.2f'|format(bank.unstaked) if bank else ''}}"> <button>update</button></form>
+ <form class="inline" method="post" action="{{url_for('set_kelly')}}">stake <select name="fraction" onchange="this.form.submit()">
+  {% for v,l in [(1,'full Kelly'),(0.5,'½ Kelly'),(0.25,'¼ Kelly'),(0.125,'⅛ Kelly')] %}<option value="{{v}}" {{'selected' if (kelly-v)|abs < 0.01}}>{{l}}</option>{% endfor %}</select></form>
+</div>
+
+<h2>Board — next {{show_days}} days · handicap bet |edge| ≥ {{signal}} · total bet |edge| ≥ {{tsignal}} · soft when AU trails sharp by ≥ {{lag}} (totals {{tlag}})</h2>
 {% if not cards %}<div class="card">No upcoming games to show.</div>{% endif %}
 {% for c in cards %}
-<div class="card {{'sig' if c.pick else ('zap' if c.sharp_call else '')}}">
+<div class="card {{'sig' if c.pick else ('zap' if c.sharp_call else '')}} {{'tsig' if (c.tot_pick or c.soft_tot) else ''}}">
  <div class="hdr">
   <div><span class="teams">{{c.a}} @ {{c.h}}</span> <span class="kick">{{c.kick}} AU · {{c.n_au}} AU books / {{c.n_books}} total</span></div>
   <div>
    {% if c.pick %}<span class="bet">BET {{c.pick.team}} {{'%+.1f'|format(c.pick.line)}} @ {{c.au_book}} {{'%.2f'|format(c.pick.odds) if c.pick.odds else ''}} · edge {{'%.1f'|format(c.pick.edge)}} · cover {{'%.0f'|format(c.cover*100)}}%</span>
    {% else %}<span class="nobet">no model bet (edge {{'%+.1f'|format(c.edge) if c.edge==c.edge else '–'}})</span>{% endif %}
    {% if c.sharp_call %} <span class="soft">AU SOFT: {{c.sharp_call.team}} {{'%+.1f'|format(c.sharp_call.line)}} ({{'%+.1f'|format(c.sharp_call.gap)}} vs sharp)</span>{% endif %}
+   {% if c.tot_pick %} <span class="bet">TOTAL: {{c.tot_pick.side|upper}} {{'%.1f'|format(c.tot_pick.line)}} · edge {{'%.1f'|format(c.tot_pick.edge)}}</span>{% endif %}
+   {% if c.soft_tot %} <span class="soft">AU SOFT TOTAL: {{c.soft_tot.side|upper}} {{'%.1f'|format(c.soft_tot.line)}} ({{'%+.1f'|format(c.soft_tot.gap)}} vs sharp)</span>{% endif %}
   </div>
  </div>
+ {% for f in [c.pick_form, c.soft_form, c.tot_form, c.soft_tot_form] if f %}
+ <form class="row quick" method="post" action="{{url_for('quicklog')}}">
+  <input type="hidden" name="gdate" value="{{c.gd}}"><input type="hidden" name="home" value="{{c.home}}"><input type="hidden" name="away" value="{{c.away}}">
+  <input type="hidden" name="side" value="{{f.side}}"><input type="hidden" name="model" value="{{f.model}}">
+  <span class="small">{{f.model|replace('_',' ')}} · {{f.team}}</span>
+  <input name="line" type="number" step="0.5" value="{{'%.1f'|format(f.line)}}" style="width:70px" title="line">
+  @<input name="odds" type="number" step="0.01" value="{{'%.2f'|format(f.odds)}}" style="width:70px" title="price">
+  ×<input name="stake" type="number" step="1" min="1" value="{{f.stake or 1}}" style="width:60px" title="stake (Kelly suggestion)">
+  <input name="book" value="{{f.book}}" style="width:110px" title="book">
+  <button class="pri">bet</button>
+  <span class="small">EV {{'%+.1f'|format(f.ev*100)}}%{% if f.stake %} · Kelly {{f.stake}}{% else %} · set a bankroll for Kelly{% endif %}</span>
+ </form>
+ {% endfor %}
  <div class="grid">
   <div><div class="k">{{c.au_book}} line</div><div class="v">{{c.au}} <span class="small">{{c.au_odds}}</span></div></div>
   <div><div class="k">{{c.sharp_book}} line</div><div class="v">{% if c.gap==c.gap %}{{c.sharp}} <span class="small">gap {{'%+.1f'|format(c.gap)}}</span>{% else %}<span class="small">no sharp line yet</span>{% endif %}</div></div>
   <div><div class="k">Model (blend {{blend}})</div><div class="v">{{c.model}} <span class="small">raw {{c.model_raw}}</span></div></div>
   <div><div class="k">P(home) · H2H</div><div class="v">{{'%.0f'|format(c.p_home*100)}}% <span class="small">{{c.h2h}}</span></div></div>
-  <div><div class="k">Total AU / model</div><div class="v">{{'%.1f'|format(c.au_total) if c.au_total==c.au_total else '–'}} / {{'%.1f'|format(c.pred_total) if c.pred_total==c.pred_total else '–'}} <span class="small">{{'%+.1f'|format(c.t_edge) if c.t_edge==c.t_edge else ''}}</span></div></div>
+  <div><div class="k">Total AU / sharp / model</div><div class="v">{{'%.1f'|format(c.au_total) if c.au_total==c.au_total else '–'}} / {{'%.1f'|format(c.sharp_total) if c.sharp_total==c.sharp_total else '–'}} / {{'%.1f'|format(c.pred_total) if c.pred_total==c.pred_total else '–'}} <span class="small">{{'%+.1f'|format(c.t_edge) if c.t_edge==c.t_edge else ''}}</span></div></div>
   <div><div class="k">Elo · form · rest · tz</div><div class="v small">{{c.elo}} · {{c.form}} · {{c.rest}}d · {{c.tz}}h</div></div>
  </div>
  <div class="outs">
@@ -353,19 +399,28 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
  <form method="post" action="{{url_for('add_bet')}}" class="row">
   <input name="gdate" type="date" required><select name="home" required><option value="">home…</option>{% for t in teams %}<option>{{t}}</option>{% endfor %}</select>
   <select name="away" required><option value="">away…</option>{% for t in teams %}<option>{{t}}</option>{% endfor %}</select>
-  <select name="side"><option value="home">home</option><option value="away">away</option></select>
-  <input name="line" type="number" step="0.5" placeholder="line (+/-)" style="width:100px" required>
+  <select name="side"><option value="home">home</option><option value="away">away</option><option value="over">over</option><option value="under">under</option></select>
+  <input name="line" type="number" step="0.5" placeholder="line (+/-) or total" style="width:130px" required>
   <input name="odds" type="number" step="0.01" placeholder="odds" style="width:80px" value="1.91">
   <input name="stake" type="number" step="1" placeholder="stake" style="width:80px" required>
   <input name="book" placeholder="book" style="width:110px" value="{{au_book}}">
   <button class="pri">Log</button>
  </form>
- {% if bets %}<table><tr><th>Game</th><th>Bet</th><th class="num">Odds</th><th class="num">Stake</th><th>Book</th><th>Score</th><th>Result</th><th class="num">P/L</th><th class="num">CLV</th><th></th></tr>
- {% for b in bets %}<tr><td>{{b.gdate}} {{b.away_s}} @ {{b.home_s}}</td><td>{{b.team_s}} {{'%+.1f'|format(b.line)}}</td><td class="num">{{'%.2f'|format(b.odds)}}</td><td class="num">{{'%.0f'|format(b.stake)}}</td><td>{{b.book}}</td>
+ {% if bets %}<table><tr><th>Game</th><th>Bet</th><th>Src</th><th class="num">Odds</th><th class="num">Stake</th><th>Book</th><th>Score</th><th>Result</th><th class="num">P/L</th><th class="num">CLV</th><th></th></tr>
+ {% for b in bets %}<tr><td>{{b.gdate}} {{b.away_s}} @ {{b.home_s}}</td><td>{{b.team_s}} {{('%.1f' if b.is_total else '%+.1f')|format(b.line)}}</td><td class="small">{{b.model or 'manual'}}</td><td class="num">{{'%.2f'|format(b.odds)}}</td><td class="num">{{'%.0f'|format(b.stake)}}</td><td>{{b.book}}</td>
   <td>{{b.score}}</td><td class="{{'ok' if b.result=='W' else ('bad' if b.result=='L' else '')}}">{{b.result or 'pending'}}</td><td class="num">{{'%+.0f'|format(b.profit) if b.profit is not none else ''}}</td><td class="num">{{b.clv}}</td>
   <td><form class="inline" method="post" action="{{url_for('remove_bet')}}"><input type="hidden" name="rowid" value="{{b.rowid}}"><button class="danger">×</button></form></td></tr>{% endfor %}</table>
- <div class="small" style="margin-top:6px">Settled {{tally.n}} · W-L-P {{tally.w}}-{{tally.l}}-{{tally.p}} · P/L {{'%+.0f'|format(tally.pl)}} · ROI {{'%.1f'|format(tally.roi*100)}}% · avg CLV {{tally.clv}}</div>
+ <table style="margin-top:10px"><tr><th>Performance by source</th><th class="num">bets</th><th class="num">settled</th><th class="num">W-L-P</th><th class="num">P/L</th><th class="num">ROI</th><th class="num">avg CLV</th><th class="num">beat close</th></tr>
+ {% for t in tally %}<tr><td>{{t.label}}</td><td class="num">{{t.n}}</td><td class="num">{{t.settled}}</td><td class="num">{{t.w}}-{{t.l}}-{{t.p}}</td><td class="num {{'ok' if t.pl>0 else ('bad' if t.pl<0 else '')}}">{{'%+.2f'|format(t.pl)}}</td><td class="num">{{'%+.1f'|format(t.roi*100)}}%</td><td class="num">{{t.clv}}</td><td class="num">{{t.beat}}</td></tr>{% endfor %}</table>
  {% else %}<div class="small">No bets logged.</div>{% endif %}
+</div>
+
+<h2>Signal scorecard — every flagged signal, taken or not</h2>
+<div class="card">
+ {% if scorecards %}<table><tr><th>Signal</th><th class="num">n</th><th class="num">avg CLV (pts)</th><th class="num">beat close</th><th class="num">settled</th><th class="num">cover</th><th class="num">ROI @1.91</th></tr>
+ {% for sc in scorecards %}<tr><td>{{sc.label}}</td><td class="num">{{sc.n}}</td><td class="num {{'ok' if sc.pos else 'bad'}}">{{sc.avg_clv}}</td><td class="num">{{sc.beat}}</td><td class="num">{{sc.settled or '–'}}</td><td class="num">{{sc.cover or '–'}}</td><td class="num">{{sc.roi or '–'}}</td></tr>{% endfor %}</table>
+ <div class="small" style="margin-top:6px">CLV = the pick's AU line at the first flag vs the last AU capture (positive = the line moved toward the pick). Cover/ROI once results land. This is the unbiased read on both the model and the "AU is soft" thesis.</div>
+ {% else %}<div class="small">Needs at least two captures per game (first poll vs close). Accumulates from the first cron poll.</div>{% endif %}
 </div>
 
 <h2>Backtest &amp; market structure</h2>
@@ -407,26 +462,42 @@ def index():
         except Exception:  # noqa: BLE001
             pass
         outs.append(o.to_dict())
-    bets_df = _settle_bets(db.read_bets())
-    bets, tally = [], {"n": 0, "w": 0, "l": 0, "p": 0, "pl": 0.0, "roi": 0.0, "clv": "–"}
-    clvs, staked = [], 0.0
+    bets_df = settle_bets(db.read_bets())
+    bets = []
     for _, b in bets_df.sort_values("gdate", ascending=False).iterrows():
         d = b.to_dict()
         d["home_s"], d["away_s"] = short(b["home"]), short(b["away"])
-        d["team_s"] = short(b["home"]) if b["side"] == "home" else short(b["away"])
+        d["team_s"] = ({"home": short(b["home"]), "away": short(b["away"]), "over": "OVER", "under": "UNDER"}
+                       .get(b["side"], b["side"]))
+        d["is_total"] = b["side"] in ("over", "under")
         d["score"] = (f"{int(b['home_score'])}-{int(b['away_score'])}" if pd.notna(b.get("home_score")) else "")
         d["profit"] = b["profit"] if pd.notna(b.get("profit")) else None
         if pd.notna(b.get("close_line")):
-            clv = float(b["line"]) - float(b["close_line"])   # got more points than the close = +
-            clvs.append(clv); d["clv"] = f"{clv:+.1f}"
+            clv = float(b["line"]) - float(b["close_line"])
+            if b["side"] == "over":
+                clv = -clv
+            d["clv"] = f"{clv:+.1f}"
         else:
             d["clv"] = ""
-        if b.get("result") in ("W", "L", "P"):
-            tally["n"] += 1; tally[b["result"].lower()] += 1
-            tally["pl"] += float(b["profit"] or 0); staked += float(b["stake"] or 0)
         bets.append(d)
-    tally["roi"] = tally["pl"] / staked if staked else 0.0
-    tally["clv"] = f"{np.mean(clvs):+.2f}" if clvs else "–"
+    bank = None
+    try:
+        bank = bk.current()
+        if bank:
+            h = bk.history()
+            tot = pd.to_numeric(h["total"], errors="coerce").dropna().tolist() if len(h) else []
+            tot = tot + [bank["total"]]
+            peak = max(tot); run_max = np.maximum.accumulate(tot)
+            bank["peak"] = peak; bank["max_dd"] = float(np.max(run_max - np.array(tot)))
+            bars = "▁▂▃▄▅▆▇█"
+            lo, hi = min(tot), max(tot)
+            bank["spark"] = "".join(bars[int((v - lo) / (hi - lo) * 7)] if hi > lo else bars[3] for v in tot[-40:])
+    except Exception:  # noqa: BLE001
+        bank = None
+    try:
+        scorecards = signal_scorecards()
+    except Exception:  # noqa: BLE001
+        scorecards = []
     bt = None
     try:
         p = DATA_DIR / "backtest_summary.json"
@@ -435,8 +506,9 @@ def index():
         bt = None
     return render_template_string(
         PAGE, st=_status(), warn=warn, cards=cards, show_days=SHOW_DAYS, signal=SIGNAL_EDGE,
-        lag=SHARP_LAG_MIN, blend=MARKET_BLEND, teams=sorted(TEAMS), positions=POSITIONS, outs=outs,
-        watch=db.get_json("injury_watch", []), bets=bets, tally=tally, bt=bt, coeffs=_coeffs(),
+        lag=SHARP_LAG_MIN, blend=MARKET_BLEND, tsignal=TOTAL_SIGNAL, tlag=TOTAL_LAG_MIN, teams=sorted(TEAMS), positions=POSITIONS, outs=outs,
+        watch=db.get_json("injury_watch", []), bets=bets, tally=tally(bets_df), bt=bt, coeffs=_coeffs(),
+        bank=bank, kelly=bk.kelly_fraction(), scorecards=scorecards,
         au_book=(cards[0]["au_book"] if cards else "Sportsbet"), regions=ODDS_REGIONS, markets=ODDS_MARKETS)
 
 
@@ -520,9 +592,45 @@ def add_bet():
     side = f.get("side", "home")
     home, away = canon_team(f.get("home")), canon_team(f.get("away"))
     db.add_bet({"logged": str(_now())[:16], "gdate": f.get("gdate"), "home": home, "away": away, "side": side,
-                "team": home if side == "home" else away, "line": float(f.get("line") or 0),
+                "team": {"home": home, "away": away}.get(side, side.upper()), "line": float(f.get("line") or 0),
                 "odds": float(f.get("odds") or 1.909), "stake": float(f.get("stake") or 0),
-                "book": f.get("book") or ""})
+                "book": f.get("book") or "", "model": "manual"})
+    return redirect(url_for("index"))
+
+
+@app.route("/quicklog", methods=["POST"])
+def quicklog():
+    """One-click: log a flagged pick (model or AU-soft) at the shown price/stake."""
+    f = request.form
+    side = f.get("side", "home")
+    home, away = canon_team(f.get("home")), canon_team(f.get("away"))
+    try:
+        line, odds, stake = float(f.get("line")), float(f.get("odds") or 1.909), float(f.get("stake") or 1)
+    except (TypeError, ValueError):
+        return redirect(url_for("index"))
+    db.add_bet({"logged": str(_now())[:16], "gdate": f.get("gdate"), "home": home, "away": away, "side": side,
+                "team": {"home": home, "away": away}.get(side, side.upper()), "line": line, "odds": odds,
+                "stake": stake, "book": f.get("book") or "", "model": f.get("model") or "manual"})
+    return redirect(url_for("index"))
+
+
+@app.route("/set_bankroll", methods=["POST"])
+def set_bankroll():
+    try:
+        bk.set_anchor(float(request.form.get("unstaked")))
+    except (TypeError, ValueError):
+        pass
+    return redirect(url_for("index"))
+
+
+@app.route("/set_kelly", methods=["POST"])
+def set_kelly():
+    try:
+        v = float(request.form.get("fraction"))
+        if 0 < v <= 1:
+            db.set_kv("kelly_fraction", v)
+    except (TypeError, ValueError):
+        pass
     return redirect(url_for("index"))
 
 
