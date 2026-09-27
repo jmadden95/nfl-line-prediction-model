@@ -196,6 +196,20 @@ def get_board(force_fresh: bool = False):
     except Exception:  # noqa: BLE001
         bank = None
     bank_total = bank["total"] if bank else None
+    # Pending bets by (home, away, side) so every pick can show "already bet".
+    placed, my_bets = set(), {}
+    try:
+        _b = db.read_bets()
+        for _, b in _b[~_b["result"].isin(["W", "L", "P"])].iterrows():
+            side = str(b["side"]).lower()
+            gk = (canon_team(b["home"]), canon_team(b["away"]))
+            placed.add((*gk, side))
+            ln = float(b["line"])
+            lbl = (f"{side.upper()} {ln:g}" if side in ("over", "under")
+                   else f"{short(b['home'] if side == 'home' else b['away'])} {ln:+g}")
+            my_bets.setdefault(gk, []).append(lbl)
+    except Exception:  # noqa: BLE001
+        pass
     cards = []
     for _, r in up.iterrows():
         ko = pd.to_datetime(r["Kickoff"], errors="coerce")
@@ -218,6 +232,7 @@ def get_board(force_fresh: bool = False):
                     "stake": bk.kelly_stake(ev, odds, bank_total), "ev": ev, "model": model,
                     "team": short(r["Home Team"]) if side == "home" else short(r["Away Team"])}
         pick_form = _form(pick["side"], pick["line"], pick["edge"], "model") if pick else None
+        _gk = (r["Home Team"], r["Away Team"])
 
         def _tform(over: bool, line, edge_pts, model):
             shop = _au_shop_totals(books, over)
@@ -240,7 +255,11 @@ def get_board(force_fresh: bool = False):
             soft_tot_form = _tform(tgap < 0, r["au_total"], abs(tgap), "soft_total")
         soft_form = (_form("home" if soft["team"] == short(r["Home Team"]) else "away",
                            soft["line"], soft["gap"], "soft") if soft else None)
+        for _frm in (pick_form, soft_form, tot_form, soft_tot_form):
+            if _frm:
+                _frm["taken"] = (*_gk, _frm["side"]) in placed
         cards.append({
+            "my_bets": my_bets.get(_gk, []),
             "pick_form": pick_form, "soft_form": soft_form, "tot_pick": tot_pick, "tot_form": tot_form,
             "soft_tot": soft_tot, "soft_tot_form": soft_tot_form, "sharp_total": r.get("sharp_total"),
             "wx": ("enclosed" if r.get("enclosed") in (True, 1) else
@@ -309,6 +328,7 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
 .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
 .small{font-size:12px;color:var(--mut)}code{background:#0d1117;padding:1px 4px;border-radius:3px}
 .spark{font-family:ui-monospace,monospace;font-size:12px;color:var(--mut)}
+.taken{font-size:12px;color:#ffd866;background:#2e2410;padding:2px 8px;border-radius:6px;font-weight:600}
 .quick{background:#0d1117;border:1px dashed var(--line);border-radius:6px;padding:4px 8px;margin-top:6px}
 .bank{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;background:#10181f;border:1px solid #244055;border-radius:8px;padding:8px 12px;margin:10px 0}
 .bank b{font-size:16px}
@@ -346,7 +366,7 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
 {% for c in cards %}
 <div class="card {{'sig' if c.pick else ('zap' if c.sharp_call else '')}} {{'tsig' if (c.tot_pick or c.soft_tot) else ''}}">
  <div class="hdr">
-  <div><span class="teams">{{c.a}} @ {{c.h}}</span> <span class="kick">{{c.kick}} AU · {{c.n_au}} AU books / {{c.n_books}} total</span></div>
+  <div>{% if c.my_bets %}<span class="taken">✓ on: {{c.my_bets|join(', ')}}</span> {% endif %}<span class="teams">{{c.a}} @ {{c.h}}</span> <span class="kick">{{c.kick}} AU · {{c.n_au}} AU books / {{c.n_books}} total</span></div>
   <div>
    {% if c.pick %}<span class="bet">BET {{c.pick.team}} {{'%+.1f'|format(c.pick.line)}} @ {{c.au_book}} {{'%.2f'|format(c.pick.odds) if c.pick.odds else ''}} · edge {{'%.1f'|format(c.pick.edge)}} · cover {{'%.0f'|format(c.cover*100)}}%</span>
    {% else %}<span class="nobet">no model bet (edge {{'%+.1f'|format(c.edge) if c.edge==c.edge else '–'}})</span>{% endif %}
@@ -356,6 +376,7 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
   </div>
  </div>
  {% for f in [c.pick_form, c.soft_form, c.tot_form, c.soft_tot_form] if f %}
+ {% if f.taken %}<div class="row quick"><span class="small">{{f.model|replace('_',' ')}} · {{f.team}}</span> <span class="taken">✓ already bet {{f.team}}</span></div>{% else %}
  <form class="row quick" method="post" action="{{url_for('quicklog')}}">
   <input type="hidden" name="gdate" value="{{c.gd}}"><input type="hidden" name="home" value="{{c.home}}"><input type="hidden" name="away" value="{{c.away}}">
   <input type="hidden" name="side" value="{{f.side}}"><input type="hidden" name="model" value="{{f.model}}">
@@ -366,7 +387,7 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
   <input name="book" value="{{f.book}}" style="width:110px" title="book">
   <button class="pri">bet</button>
   <span class="small">EV {{'%+.1f'|format(f.ev*100)}}%{% if f.stake %} · Kelly {{f.stake}}{% else %} · set a bankroll for Kelly{% endif %}</span>
- </form>
+ </form>{% endif %}
  {% endfor %}
  <div class="grid">
   <div><div class="k">{{c.au_book}} line</div><div class="v">{{c.au}} <span class="small">{{c.au_odds}}</span></div></div>
