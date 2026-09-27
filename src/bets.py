@@ -2,7 +2,9 @@
 import numpy as np
 import pandas as pd
 
-from config import SHARP_LAG_MIN, SIGNAL_EDGE, TOTAL_LAG_MIN, TOTAL_SIGNAL
+from config import (DOG_EDGE, FAV_EDGE, SHARP_LAG_MIN, TOTAL_LAG_MIN, TOTAL_OVER_EDGE,
+                    TOTAL_UNDER_EDGE)
+from src.signals import handicap_signal, total_signal
 from src import db
 
 STD_ODDS = 1.909
@@ -134,8 +136,9 @@ def signal_scorecards() -> list:
     if len(preds):
         preds = preds.sort_values("captured_ts")
         for (gd, h, a), g in preds.groupby(["game_date", "home", "away"]):
-            first = g[g["edge"].abs() >= SIGNAL_EDGE].head(1)
-            if not len(first) or pd.isna(first.iloc[0]["au_point"]):
+            flag = g.apply(lambda x: handicap_signal(x["edge"], -x["au_point"]) if pd.notna(x["au_point"]) else None, axis=1)
+            first = g[flag.notna()].head(1)
+            if not len(first):
                 continue
             f = first.iloc[0]
             side = 1 if f["edge"] > 0 else -1                      # +1 home
@@ -151,7 +154,7 @@ def signal_scorecards() -> list:
         if "pred_total" in preds.columns:
             for (gd, h, a), g in preds.groupby(["game_date", "home", "away"]):
                 te = pd.to_numeric(g["pred_total"], errors="coerce") - pd.to_numeric(g["au_total"], errors="coerce")
-                first = g[te.abs() >= TOTAL_SIGNAL].head(1)
+                first = g[te.map(total_signal).notna()].head(1)
                 if not len(first):
                     continue
                 f = first.iloc[0]
@@ -191,7 +194,7 @@ def signal_scorecards() -> list:
         mg = results.get((gd, h, a))
         cover = ((line - mg[1]) if under else (mg[1] - line)) if mg is not None else np.nan
         soft_tot_recs.append({"clv": clv, "cover": cover})
-    return [s for s in (_score(model_recs, "Handicap: model (|edge| ≥ %.1f)" % SIGNAL_EDGE),
+    return [s for s in (_score(model_recs, "Handicap: model (fav ≥ %.1f / dog ≥ %.1f)" % (FAV_EDGE, DOG_EDGE)),
                         _score(soft_recs, "Handicap: AU soft (trails sharp ≥ %.1f)" % SHARP_LAG_MIN),
-                        _score(total_recs, "Totals: model (|edge| ≥ %.1f)" % TOTAL_SIGNAL),
+                        _score(total_recs, "Totals: model (under ≥ %.1f / over ≥ %.1f)" % (TOTAL_UNDER_EDGE, TOTAL_OVER_EDGE)),
                         _score(soft_tot_recs, "Totals: AU soft (vs sharp ≥ %.1f)" % TOTAL_LAG_MIN)) if s]

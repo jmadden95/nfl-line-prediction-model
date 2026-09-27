@@ -12,7 +12,9 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 
 from config import (DATA_DIR, LOCAL_TZ, MARKET_BLEND, NFLVERSE_GAMES_CSV, NTFY_TOPIC, NTFY_URL,
                     ODDS_API_KEY, ODDS_MARKETS, ODDS_REGIONS, POSITION_POINTS, RAW_XLSX,
-                    SHARP_LAG_MIN, SIGNAL_EDGE, TOTAL_LAG_MIN, TOTAL_SIGNAL)
+                    SHARP_LAG_MIN, SIGNAL_EDGE, TOTAL_LAG_MIN, TOTAL_SIGNAL, FAV_EDGE, DOG_EDGE,
+                    TOTAL_UNDER_EDGE, TOTAL_OVER_EDGE)
+from src.signals import handicap_signal, total_signal
 from src import db
 from src import bankroll as bk
 from src.bets import settle_bets, signal_scorecards, tally
@@ -66,10 +68,11 @@ def _pick(r):
     if e is None or pd.isna(e) or pd.isna(r.get("au_point")):
         return None
     ap = float(r["au_point"])
-    if e >= SIGNAL_EDGE:
+    side = handicap_signal(e, r.get("bookie_margin"))
+    if side == "home":
         return {"team": short(r["Home Team"]), "line": ap, "side": "home", "edge": float(e),
                 "odds": r.get("au_home_odds")}
-    if e <= -SIGNAL_EDGE:
+    if side == "away":
         return {"team": short(r["Away Team"]), "line": -ap, "side": "away", "edge": float(-e),
                 "odds": r.get("au_away_odds")}
     return None
@@ -163,6 +166,12 @@ def get_board(force_fresh: bool = False):
     up = predict_upcoming(events)
     if not len(up):
         return [], warn or "No upcoming games in the odds feed."
+    try:
+        from src.weather import capture_forecast
+        if capture_forecast(events):          # throttled (3h per game); free API
+            up = predict_upcoming(events)     # re-run so the fresh wind feeds the totals
+    except Exception:  # noqa: BLE001
+        pass
     # totals
     try:
         from src.features import build_features
@@ -221,9 +230,10 @@ def get_board(force_fresh: bool = False):
                     "stake": bk.kelly_stake(ev, odds, bank_total), "ev": ev, "model": model,
                     "team": ("OVER" if over else "UNDER")}
         tot_pick = tot_form = soft_tot = soft_tot_form = None
-        if pd.notna(t_edge) and abs(t_edge) >= TOTAL_SIGNAL:
-            tot_pick = {"side": "over" if t_edge > 0 else "under", "line": float(r["au_total"]), "edge": abs(float(t_edge))}
-            tot_form = _tform(t_edge > 0, r["au_total"], abs(float(t_edge)), "model_total")
+        tsig = total_signal(t_edge) if pd.notna(t_edge) else None
+        if tsig:
+            tot_pick = {"side": tsig, "line": float(r["au_total"]), "edge": abs(float(t_edge))}
+            tot_form = _tform(tsig == "over", r["au_total"], abs(float(t_edge)), "model_total")
         tgap = (float(r["au_total"]) - float(r["sharp_total"])) if pd.notna(r.get("au_total")) and pd.notna(r.get("sharp_total")) else np.nan
         if pd.notna(tgap) and abs(tgap) >= TOTAL_LAG_MIN:
             soft_tot = {"side": "under" if tgap > 0 else "over", "line": float(r["au_total"]), "gap": abs(tgap)}
@@ -233,12 +243,20 @@ def get_board(force_fresh: bool = False):
         cards.append({
             "pick_form": pick_form, "soft_form": soft_form, "tot_pick": tot_pick, "tot_form": tot_form,
             "soft_tot": soft_tot, "soft_tot_form": soft_tot_form, "sharp_total": r.get("sharp_total"),
+            "wx": ("enclosed" if r.get("enclosed") in (True, 1) else
+                   ("venue unknown" if r.get("enclosed") is None or (isinstance(r.get("enclosed"), float) and pd.isna(r.get("enclosed")))
+                    else (f"wind {float(r['wind']):.0f} mph" + (f", gust {float(r['gust_mph']):.0f}" if pd.notna(r.get('gust_mph')) else "")
+                          if pd.notna(r.get("wind")) else "outdoor, no forecast yet"))),
+            "venue": r.get("venue") or "",
+            "windy": bool(pd.notna(r.get("wind")) and float(r.get("wind") or 0) >= 15 and r.get("enclosed") is False),
             "gd": gd, "kick": ko.strftime("%a %d %b %H:%M") if pd.notna(ko) else "–",
             "home": r["Home Team"], "away": r["Away Team"], "h": short(r["Home Team"]), "a": short(r["Away Team"]),
             "au_book": r.get("au_book") or "AU", "au": _hcap(r["Home Team"], r["Away Team"], r.get("au_point")),
             "au_odds": f"{_f(r.get('au_home_odds'),2)} / {_f(r.get('au_away_odds'),2)}",
-            "sharp_book": r.get("sharp_book") or "Pinnacle",
+            "sharp_book": (lambda sb: ("sharp (median of %s)" % sb) if "," in sb else sb)(r.get("sharp_book") if isinstance(r.get("sharp_book"), str) and r.get("sharp_book") else "Pinnacle"),
             "sharp": _hcap(r["Home Team"], r["Away Team"], r.get("sharp_point")),
+            "sharp_detail": " · ".join(f"{k.replace(' (US)','')} {_hcap(r['Home Team'], r['Away Team'], v[0])}"
+                                       for k, v in sorted((r.get("sharp_detail") or {}).items()) if v[0] is not None),
             "gap": r.get("au_vs_sharp"), "sharp_call": _sharp_call(r),
             "model": _hcap(r["Home Team"], r["Away Team"], -r["pred_margin"] if pd.notna(r["pred_margin"]) else None),
             "model_raw": _hcap(r["Home Team"], r["Away Team"], -r["pred_raw"] if pd.notna(r["pred_raw"]) else None),
@@ -323,7 +341,7 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
   {% for v,l in [(1,'full Kelly'),(0.5,'½ Kelly'),(0.25,'¼ Kelly'),(0.125,'⅛ Kelly')] %}<option value="{{v}}" {{'selected' if (kelly-v)|abs < 0.01}}>{{l}}</option>{% endfor %}</select></form>
 </div>
 
-<h2>Board — next {{show_days}} days · handicap bet |edge| ≥ {{signal}} · total bet |edge| ≥ {{tsignal}} · soft when AU trails sharp by ≥ {{lag}} (totals {{tlag}})</h2>
+<h2>Board — next {{show_days}} days · handicap: fav ≥ {{fav}} / dog ≥ {{dog}} · totals: under ≥ {{tu}} / over ≥ {{to}} (wind-aware) · soft when AU trails Pinnacle by ≥ {{lag}} (totals {{tlag}})</h2>
 {% if not cards %}<div class="card">No upcoming games to show.</div>{% endif %}
 {% for c in cards %}
 <div class="card {{'sig' if c.pick else ('zap' if c.sharp_call else '')}} {{'tsig' if (c.tot_pick or c.soft_tot) else ''}}">
@@ -352,11 +370,12 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
  {% endfor %}
  <div class="grid">
   <div><div class="k">{{c.au_book}} line</div><div class="v">{{c.au}} <span class="small">{{c.au_odds}}</span></div></div>
-  <div><div class="k">{{c.sharp_book}} line</div><div class="v">{% if c.gap==c.gap %}{{c.sharp}} <span class="small">gap {{'%+.1f'|format(c.gap)}}</span>{% else %}<span class="small">no sharp line yet</span>{% endif %}</div></div>
+  <div><div class="k">{{c.sharp_book}} line</div><div class="v">{% if c.gap==c.gap %}{{c.sharp}} <span class="small">gap {{'%+.1f'|format(c.gap)}}</span><div class="small">{{c.sharp_detail}}</div>{% else %}<span class="small">no sharp line yet</span>{% endif %}</div></div>
   <div><div class="k">Model (blend {{blend}})</div><div class="v">{{c.model}} <span class="small">raw {{c.model_raw}}</span></div></div>
   <div><div class="k">P(home) · H2H</div><div class="v">{{'%.0f'|format(c.p_home*100)}}% <span class="small">{{c.h2h}}</span></div></div>
   <div><div class="k">Total AU / sharp / model</div><div class="v">{{'%.1f'|format(c.au_total) if c.au_total==c.au_total else '–'}} / {{'%.1f'|format(c.sharp_total) if c.sharp_total==c.sharp_total else '–'}} / {{'%.1f'|format(c.pred_total) if c.pred_total==c.pred_total else '–'}} <span class="small">{{'%+.1f'|format(c.t_edge) if c.t_edge==c.t_edge else ''}}</span></div></div>
   <div><div class="k">Elo · form · rest · tz</div><div class="v small">{{c.elo}} · {{c.form}} · {{c.rest}}d · {{c.tz}}h</div></div>
+  <div><div class="k">Venue · weather</div><div class="v small">{{c.venue[:30]}} · <span class="{{'warn' if c.windy else ''}}">{{c.wx}}</span></div></div>
  </div>
  <div class="outs">
   Outs: <b>{{c.h}}</b>
@@ -439,6 +458,11 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
 {% else %}<div class="small">No backtest yet — click "Run backtest" (~20s).</div>{% endif %}
 </div>
 
+{% if bt and bt.rules %}<h2>Live signal rules — walk-forward, chosen on 2012-18, checked on 2019-25</h2>
+<div class="card"><table><tr><th>Rule</th><th class="num">train n</th><th class="num">train cover</th><th class="num">train ROI</th><th class="num">validate n</th><th class="num">validate cover</th><th class="num">validate ROI</th></tr>
+{% for r in bt.rules %}<tr><td>{{r.name}}</td><td class="num">{{r.train_n}}</td><td class="num">{{'%.1f'|format(r.train_cover*100)}}%</td><td class="num">{{'%+.1f'|format(r.train_roi*100)}}%</td><td class="num">{{r.val_n}}</td><td class="num">{{'%.1f'|format(r.val_cover*100)}}%</td><td class="num {{'ok' if r.val_roi>0 else 'bad'}}">{{'%+.1f'|format(r.val_roi*100)}}%</td></tr>{% endfor %}</table>
+<div class="small" style="margin-top:6px">Settled at 1.91 vs the workbook OPENING line (Pinnacle/bet365/Betr). Edges shrink by kickoff — bet early, judge live by CLV.</div></div>{% endif %}
+
 <h2>Model weights (line-free linear, latest fit)</h2>
 <div class="card small">{% for f,c in coeffs %}<span style="display:inline-block;margin:2px 12px 2px 0"><b>{{f}}</b> {{'%+.3f'|format(c)}}</span>{% else %}not fitted yet{% endfor %}
  <div style="margin-top:6px">backup_qb_diff is the learned cost of a backup QB starting (pts of margin); positive = the side with the starter gains.</div></div>
@@ -506,7 +530,8 @@ def index():
         bt = None
     return render_template_string(
         PAGE, st=_status(), warn=warn, cards=cards, show_days=SHOW_DAYS, signal=SIGNAL_EDGE,
-        lag=SHARP_LAG_MIN, blend=MARKET_BLEND, tsignal=TOTAL_SIGNAL, tlag=TOTAL_LAG_MIN, teams=sorted(TEAMS), positions=POSITIONS, outs=outs,
+        lag=SHARP_LAG_MIN, blend=MARKET_BLEND, tsignal=TOTAL_SIGNAL, tlag=TOTAL_LAG_MIN,
+        fav=FAV_EDGE, dog=DOG_EDGE, tu=TOTAL_UNDER_EDGE, to=TOTAL_OVER_EDGE, teams=sorted(TEAMS), positions=POSITIONS, outs=outs,
         watch=db.get_json("injury_watch", []), bets=bets, tally=tally(bets_df), bt=bt, coeffs=_coeffs(),
         bank=bank, kelly=bk.kelly_fraction(), scorecards=scorecards,
         au_book=(cards[0]["au_book"] if cards else "Sportsbet"), regions=ODDS_REGIONS, markets=ODDS_MARKETS)

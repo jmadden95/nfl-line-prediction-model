@@ -5,7 +5,8 @@ from sklearn.linear_model import LinearRegression
 
 from config import MARKET_BLEND, TRAIN_FROM_SEASON
 
-TOTAL_FEATURES = ["exp_total", "is_dome", "div_game", "is_playoff"]
+# wind_f: mph at kickoff, 0 when enclosed — walk-forward ~ -0.26 pts/mph (src/weather.py)
+TOTAL_FEATURES = ["exp_total", "is_dome", "div_game", "is_playoff", "wind_f"]
 
 
 def _exp_total(df: pd.DataFrame) -> pd.Series:

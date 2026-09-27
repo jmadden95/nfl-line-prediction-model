@@ -104,6 +104,53 @@ def market_structure(df: pd.DataFrame) -> dict:
     return out
 
 
+def rule_report() -> list:
+    """The live signal rules vs the old ones, train 2012-18 / validate 2019-25."""
+    from src.signals import handicap_signal, total_signal
+    from src.totals import TOTAL_FEATURES
+    df = load_modelling_frame()
+    df = df[df["season"] <= int(df["season"].max())]
+    out = []
+    for y in range(2012, int(df["season"].max()) + 1):
+        tr = df[(df["season"] < y) & (df["season"] >= TRAIN_FROM_SEASON)]; te = df[df["season"] == y].copy()
+        if not len(te):
+            continue
+        m = LinearRegression().fit(tr[LINE_FREE_COLUMNS], tr["home_margin"])
+        te["pred"] = (1 - MARKET_BLEND) * m.predict(te[LINE_FREE_COLUMNS]) + MARKET_BLEND * te["bookie_margin"]
+        t_tr = tr.assign(exp_total=(tr.home_attack + tr.away_defense) / 2 + (tr.away_attack + tr.home_defense) / 2).dropna(subset=["exp_total", "total_points"])
+        te["exp_total"] = (te.home_attack + te.away_defense) / 2 + (te.away_attack + te.home_defense) / 2
+        te["total_open"] = pd.to_numeric(te.get("Total Score Open"), errors="coerce")
+        ok = te["exp_total"].notna()
+        tm = LinearRegression().fit(t_tr[TOTAL_FEATURES].fillna(0), t_tr["total_points"], sample_weight=0.85 ** (y - 1 - t_tr["season"]))
+        te["pred_total"] = np.nan
+        te.loc[ok, "pred_total"] = 0.5 * tm.predict(te.loc[ok, TOTAL_FEATURES].fillna(0)) + 0.5 * te.loc[ok, "total_open"]
+        out.append(te)
+    te = pd.concat(out)
+    e = te["pred"] - te["bookie_margin"]
+    hres = (te["home_margin"] - te["bookie_margin"]) * np.sign(e)
+    te_t = te.dropna(subset=["pred_total", "total_open"])
+    tres = (te_t["total_points"] - te_t["total_open"]) * np.sign(te_t["pred_total"] - te_t["total_open"])
+    live_h = np.array([handicap_signal(a, b) is not None for a, b in zip(e, te["bookie_margin"])])
+    live_t = (te_t["pred_total"] - te_t["total_open"]).map(total_signal).notna().to_numpy()
+    rows = [("Handicap OLD |edge|>=2", hres, (e.abs() >= 2).to_numpy(), te["season"]),
+            ("Handicap LIVE fav>=2 / dog>=3.5", hres, live_h, te["season"]),
+            ("Totals OLD |edge|>=3 (no wind)", None, None, None),
+            ("Totals LIVE under>=2 / over>=3 (wind)", tres, live_t, te_t["season"])]
+    rep = []
+    for name, res, mask, season in rows:
+        if res is None:
+            continue
+        r = {"name": name}
+        for lab, sm in (("train", season <= 2018), ("val", season >= 2019)):
+            sel = res[mask & sm.to_numpy()]
+            dec = sel[sel != 0]
+            r[f"{lab}_n"] = int(len(sel))
+            r[f"{lab}_cover"] = float((dec > 0).mean()) if len(dec) else 0.0
+            r[f"{lab}_roi"] = float(((dec > 0).sum() * 0.909 - (dec < 0).sum()) / max(len(sel), 1))
+        rep.append(r)
+    return rep
+
+
 def run(verbose: bool = True) -> dict:
     df = load_modelling_frame()
     wf = walk_forward(df)
@@ -126,6 +173,10 @@ def run(verbose: bool = True) -> dict:
     # per-season at 2.0 vs open
     summary["by_season"] = {int(s): simulate(g, "pred_blend", "bookie_margin", 2.0)
                             for s, g in wf.groupby("season")}
+    try:
+        summary["rules"] = rule_report()
+    except Exception as ex:  # noqa: BLE001
+        summary["rules_error"] = str(ex)
     summary["generated"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
     try:
         (DATA_DIR / "backtest_summary.json").write_text(json.dumps(summary, indent=1, default=float))
@@ -142,6 +193,9 @@ def run(verbose: bool = True) -> dict:
             o, c = r["vs_open"], r["vs_close"]
             print(f"  {t:<8}{o['bets']:>6}{o.get('cover', 0):>13.1%}{o.get('roi', 0):>11.1%}"
                   f"{c.get('cover', 0):>14.1%}{c.get('roi', 0):>12.1%}")
+        for r in summary.get("rules", []):
+            print(f"  RULE {r['name']:<40} train n={r['train_n']} cov {r['train_cover']:.1%} roi {r['train_roi']:+.1%} | "
+                  f"validate n={r['val_n']} cov {r['val_cover']:.1%} roi {r['val_roi']:+.1%}")
         m = summary["market"]
         print("\nMarket structure (workbook book: Pinnacle->bet365->Betr; open vs close):")
         print(f"  MAE open {m['mae_open']:.2f}  close {m['mae_close']:.2f}  (n={m['games']})")

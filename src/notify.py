@@ -96,12 +96,27 @@ def alert_sharp_lags(events: list) -> int:
 
 
 def alert_bet_signals(up) -> int:
+    from src.signals import handicap_signal, total_signal
     if up is None or not len(up):
         return 0
     sent = 0
     for _, r in up.iterrows():
+        # totals (model includes game wind; enclosed stadiums = 0)
+        pt, at = r.get("pred_total"), r.get("au_total")
+        ts = total_signal(pt - at) if pt is not None and at is not None and pd.notna(pt) and pd.notna(at) else None
+        if ts:
+            gd = str(pd.Timestamp(r["Date"]).date())
+            key = f"totsig|{gd}|{r['Home Team']}|{r['Away Team']}|{ts}"
+            if not db.was_alerted(key):
+                wind = r.get("wind_f")
+                wtxt = "enclosed" if r.get("enclosed") else (f"wind {wind:.0f} mph" if pd.notna(wind) else "wind n/a")
+                if push(f"NFL total: {ts.upper()} {float(at):.1f}",
+                        f"{r['Away Team']} @ {r['Home Team']} ({gd}) — model {float(pt):.1f} vs {r.get('au_book')} "
+                        f"{float(at):.1f} ({wtxt}). BET {ts.upper()} {float(at):.1f}.", tags="dart"):
+                    db.mark_alerted(key); sent += 1
         e = r.get("edge")
-        if e is None or pd.isna(e) or abs(e) < SIGNAL_EDGE:
+        side = handicap_signal(e, r.get("bookie_margin"))
+        if side is None:
             continue
         home, away, bm = r["Home Team"], r["Away Team"], r["bookie_margin"]
         team, line = (home, -bm) if e > 0 else (away, bm)

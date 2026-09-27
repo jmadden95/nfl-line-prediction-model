@@ -168,6 +168,12 @@ def add_context(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["is_dome"] = dome_default
     df["is_playoff"] = pd.to_numeric(df.get("is_playoff"), errors="coerce").fillna(0.0)
+    # Game wind (mph) for the totals model: ENCLOSED (dome / closed retractable) -> 0.
+    # Outdoor games with no reading get the typical outdoor wind so they stay neutral.
+    wind = pd.to_numeric(df.get("wind"), errors="coerce") if "wind" in df.columns else pd.Series(np.nan, index=df.index)
+    outdoor = df["is_dome"] == 0
+    med = float(wind[outdoor].median()) if wind[outdoor].notna().any() else 8.0
+    df["wind_f"] = np.where(outdoor, wind.fillna(med), 0.0)
     return df
 
 

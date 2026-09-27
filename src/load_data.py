@@ -98,7 +98,7 @@ def enrich_nflverse(df: pd.DataFrame) -> pd.DataFrame:
     nv = load_nflverse()
     df = df.copy()
     add = ["week", "home_rest", "away_rest", "roof", "div_game",
-           "home_qb_name", "away_qb_name", "nv_spread", "nv_total"]
+           "home_qb_name", "away_qb_name", "nv_spread", "nv_total", "wind", "temp"]
     for c in add:
         df[c] = np.nan
     if nv is None or not len(nv):

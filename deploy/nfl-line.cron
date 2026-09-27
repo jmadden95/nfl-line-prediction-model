@@ -28,3 +28,7 @@ PATH=/usr/bin:/bin
 # Budget: 4 phase polls + ~3 kickoff captures/week x 6 credits ~= 180/month, plus page-cache misses.
 # --- daily bankroll snapshot (total = unstaked + open stakes) 13:00 UTC
    0 13   *   *   *    root  docker exec nfl-line python -m src.bankroll >> /var/log/nfl-line.log 2>&1
+# --- game-time wind forecasts (open-meteo, free; enclosed stadiums = 0): twice daily +
+#     Sunday morning US before the 1pm slate. The totals model + alerts use the latest.
+   0 3,15 *   *   *    root  docker exec nfl-line python -m src.weather >> /var/log/nfl-line.log 2>&1
+  30 14   *   *   0    root  docker exec nfl-line python -m src.weather >> /var/log/nfl-line.log 2>&1

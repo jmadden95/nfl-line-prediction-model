@@ -287,8 +287,25 @@ def remove_bet(rowid: int) -> None:
 
 
 # --- odds snapshots -----------------------------------------------------------
+def _pre_kickoff(events: list) -> list:
+    """Drop games that have started: in-play lines must never enter the snapshots
+    (they corrupted the closing line / CLV before this guard, Sep 2026)."""
+    now = pd.Timestamp.now(tz="UTC")
+    out = []
+    for e in events or []:
+        ko = e.get("kickoff_utc")
+        try:
+            if ko is not None and pd.Timestamp(ko) <= now:
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+        out.append(e)
+    return out
+
+
 def snapshot_odds(events: list, phase: str = "page") -> int:
-    """One row per game per phase per day (re-runs are no-ops)."""
+    """One row per game per phase per day (re-runs are no-ops). Pre-kickoff only."""
+    events = _pre_kickoff(events)
     conn = connect()
     n = 0
     try:
@@ -329,6 +346,7 @@ def snapshot_game(event: dict, phase: str) -> int:
 
 
 def snapshot_book_lines(events: list, phase: str = "page") -> int:
+    events = _pre_kickoff(events)
     conn = connect()
     n = 0
     try:

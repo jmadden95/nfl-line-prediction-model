@@ -9,7 +9,7 @@ book) *and* the sharp line (Pinnacle), so the answer is measured, not assumed.
 - Predicts the home margin with a leakage-free linear model (form, rest, travel,
   body-clock, head-to-head, Elo, division, dome, playoff, **backup-QB**), blended
   50/50 toward the AU opening line. Flags a bet when |edge| >= `SIGNAL_EDGE`.
-- Flags **AU soft lines**: any AU book whose handicap trails Pinnacle by >=
+- Flags **AU soft lines**: any AU book whose handicap trails the sharp line (median of Pinnacle, FanDuel, DraftKings) by >=
   `SHARP_LAG_MIN` points (ntfy alert, high priority).
 - Outs: ESPN injury feed (Out / Doubtful / IR) sized by position; a starting QB
   out goes through the model's *learned* backup-QB coefficient (from nflverse
@@ -23,7 +23,7 @@ book) *and* the sharp line (Pinnacle), so the answer is measured, not assumed.
 |---|---|---|
 | History 2006+ (results, open/close lines, totals). NB lines are Pinnacle 2014-18, bet365 2018-25, Betr (AU) Sep 2025+ | aussportsbetting.com `nfl.xlsx` -> `data/nfl_results_and_odds.xlsx` | free, manual download |
 | Schedule, rest, roof, starting QBs, US closing spread | nflverse `games.csv` (auto-refreshed) | free |
-| Live odds (AU + EU/Pinnacle) | The Odds API `americanfootball_nfl` | credits = markets x regions per call |
+| Live odds (AU + Pinnacle + FanDuel/DraftKings) | The Odds API `americanfootball_nfl`, regions au,eu,us | 9 credits per call |
 | Injuries | ESPN public JSON | free (plain User-Agent only) |
 | Results | ESPN scoreboard | free |
 

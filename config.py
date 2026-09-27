@@ -42,14 +42,16 @@ LOCAL_TZ = "Australia/Sydney"       # display / "today" for the AU bettor
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 ODDS_SPORT = "americanfootball_nfl"
 # Credits per call = markets x regions. "au" = the Australian books we bet
-# with; "eu" carries Pinnacle, the global sharp reference. 3 markets x 2
-# regions = 6 credits/call — see deploy/nfl-line.cron for the monthly budget.
+# with; "eu" carries Pinnacle (the sharp reference). 3 markets x 2 regions =
+# 6 credits per call. (FanDuel/DraftKings via "us" were trialled Sep 2026:
+# AU-soft signals referenced to them saw Sportsbet move AWAY more often than
+# toward — Pinnacle stays the reference.)
 ODDS_REGIONS = os.getenv("ODDS_REGIONS", "au,eu")
 ODDS_MARKETS = os.getenv("ODDS_MARKETS", "h2h,spreads,totals")
 ODDS_CACHE_TTL = int(os.getenv("ODDS_CACHE_TTL", "43200"))   # 12h page cache
 # The book whose line is "the AU line" (bet-with book). Any AU book is captured.
 AU_BOOK = os.getenv("AU_BOOK", "sportsbet")
-# Books we treat as the sharp reference (median of whichever are present).
+# Books we treat as the sharp reference: the MEDIAN of whichever are present.
 SHARP_BOOKS = [b.strip() for b in os.getenv("SHARP_BOOKS", "pinnacle").split(",") if b.strip()]
 # Odds API bookmaker keys that are Australian books (region "au").
 AU_BOOK_KEYS = {"sportsbet", "tab", "tabtouch", "neds", "ladbrokes_au", "pointsbetau",
@@ -97,8 +99,13 @@ NON_QB_STARTER_PROB = 0.7
 
 # --- Modelling constants ---------------------------------------------------
 MARKET_BLEND = 0.5          # displayed line = 0.5*model + 0.5*AU line (as NRL)
-SIGNAL_EDGE = 2.0           # |blended edge| (pts) to flag a handicap bet; re-sweep in backtest
-TOTAL_SIGNAL = 3.0          # |model total - AU total| (pts) to flag an over/under
+# Bet-signal rules (see src/signals.py for the validation behind them)
+FAV_EDGE = 2.0              # handicap edge needed when the model backs the line's FAVOURITE
+DOG_EDGE = 3.5              # ... and when it backs the UNDERDOG (shrinkage bias -> higher bar)
+SIGNAL_EDGE = FAV_EDGE      # legacy name (display)
+TOTAL_UNDER_EDGE = 2.0      # model total below the AU total by this -> UNDER
+TOTAL_OVER_EDGE = 3.0       # model total above the AU total by this -> OVER
+TOTAL_SIGNAL = TOTAL_OVER_EDGE   # legacy name
 TOTAL_LAG_MIN = 1.5         # AU total vs sharp total gap (pts) that flags a soft total
 RANDOM_SEED = 42
 TEST_SEASONS = [2025]       # NFL season = the year it STARTS (2025 = Sep 2025-Feb 2026)

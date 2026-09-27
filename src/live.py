@@ -92,6 +92,7 @@ def _parse_event(e: dict) -> dict:
         "au_over": pick(au, "tot_over") if au else med_of(au_all, "tot_over"),
         "au_under": pick(au, "tot_under") if au else med_of(au_all, "tot_under"),
         "sharp_book": (sharp_label or ", ".join(sorted({b["title"] for b in sharps}))) if sharps else None,
+        "sharp_detail": {b["title"]: (b.get("sp_point"), b.get("tot_point")) for b in sharps},
         "sharp_point": med_of(sharps, "sp_point"),
         "sharp_home_odds": med_of(sharps, "sp_home"),
         "sharp_away_odds": med_of(sharps, "sp_away"),
@@ -178,13 +179,28 @@ def mock_events() -> list:
 
 # --- prediction -------------------------------------------------------------
 def _upcoming_frame(events: list) -> pd.DataFrame:
+    try:
+        from src.weather import lookup, venue_for
+        wx = lookup()
+    except Exception:  # noqa: BLE001
+        wx, venue_for = {}, None
     rows = []
     for e in events:
+        gd = str(pd.Timestamp(e["date"]).date())
+        w = wx.get((gd, e["home"], e["away"]), {})
+        v = venue_for(e["home"], e["away"], e["date"]) if venue_for else {"enclosed": None, "neutral": False, "venue": None}
+        enclosed = v.get("enclosed")
+        wind = 0.0 if enclosed else w.get("wind_mph")
         rows.append({"Date": e["date"], "Kickoff": e.get("kickoff"), "Home Team": e["home"],
                      "Away Team": e["away"], "raw_home": e["home"], "raw_away": e["away"],
                      "Home Score": np.nan, "Away Score": np.nan,
                      "Home Line Open": e["au_point"], "Home Line Close": np.nan,
-                     "is_playoff": 0.0, "neutral": 0.0, "is_upcoming": True})
+                     "is_playoff": 0.0, "neutral": 1.0 if v.get("neutral") else 0.0, "is_upcoming": True,
+                     # roof drives is_dome (so neutral venues use OUR venue table, not the home dome)
+                     "roof": ("closed" if enclosed else ("outdoors" if enclosed is False else np.nan)),
+                     "wind": wind if wind is not None else np.nan,
+                     "venue": v.get("venue"), "enclosed": enclosed,
+                     "gust_mph": w.get("gust_mph"), "wx_captured": w.get("captured_ts")})
     df = pd.DataFrame(rows)
     if len(df):
         df["season"] = season_of(df["Date"])
@@ -223,7 +239,7 @@ def predict_upcoming(events: list, outs: pd.DataFrame = None) -> pd.DataFrame:
     for k in ["au_book", "au_point", "au_home_odds", "au_away_odds", "au_h2h_home", "au_h2h_away",
               "au_total", "au_over", "au_under", "sharp_book", "sharp_point", "sharp_home_odds",
               "sharp_away_odds", "sharp_total", "sharp_h2h_home", "sharp_h2h_away",
-              "au_consensus_point", "n_au_books", "n_books", "books", "kickoff_utc"]:
+              "au_consensus_point", "n_au_books", "n_books", "books", "kickoff_utc", "sharp_detail"]:
         up[k] = col(k)
     # AU vs sharp disagreement, as home margin: + means sharps like home MORE than
     # the AU book does -> the AU home line is the value side (and vice versa).
