@@ -111,6 +111,28 @@ def _au_shop_totals(books, over: bool):
     return sorted(rows, key=lambda x: ((x["point"] if over else -x["point"]), -(x["price"] or 0)))
 
 
+def _totals_shop(books):
+    """Every AU book's total (+ Pinnacle for reference). Best OVER = lowest line then
+    best price; best UNDER = highest line then best price."""
+    rows = []
+    for b in books or []:
+        if b.get("tot_point") is None or not (b.get("region") == "au" or b.get("sharp")):
+            continue
+        rows.append({"book": b["title"], "point": float(b["tot_point"]), "over": b.get("tot_over"),
+                     "under": b.get("tot_under"), "sharp": bool(b.get("sharp")) and b.get("region") != "au"})
+    au = [x for x in rows if not x["sharp"]]
+    if not au:
+        return None
+    bo = min(au, key=lambda x: (x["point"], -(x["over"] or 0)))
+    bu = max(au, key=lambda x: (x["point"], x["under"] or 0))
+    for x in rows:
+        x["best_over"] = x is bo
+        x["best_under"] = x is bu
+    pts = [x["point"] for x in au]
+    return {"rows": sorted(rows, key=lambda x: (x["sharp"], x["point"], x["book"])), "best_over": bo, "best_under": bu,
+            "lo": min(pts), "hi": max(pts), "n": len(au)}
+
+
 def _line_history(gd, home, away):
     snaps = db.odds_snapshots_df()
     if not len(snaps):
@@ -162,10 +184,10 @@ def get_board(force_fresh: bool = False):
         except Exception as ex:  # noqa: BLE001
             warn = f"Odds fetch failed: {ex}"
     if not events:
-        return [], warn
+        return [], warn, set()
     up = predict_upcoming(events)
     if not len(up):
-        return [], warn or "No upcoming games in the odds feed."
+        return [], warn or "No upcoming games in the odds feed.", set()
     try:
         from src.weather import capture_forecast
         if capture_forecast(events):          # throttled (3h per game); free API
@@ -260,6 +282,7 @@ def get_board(force_fresh: bool = False):
                 _frm["taken"] = (*_gk, _frm["side"]) in placed
         cards.append({
             "my_bets": my_bets.get(_gk, []),
+            "tshop": _totals_shop(books),
             "pick_form": pick_form, "soft_form": soft_form, "tot_pick": tot_pick, "tot_form": tot_form,
             "soft_tot": soft_tot, "soft_tot_form": soft_tot_form, "sharp_total": r.get("sharp_total"),
             "wx": ("enclosed" if r.get("enclosed") in (True, 1) else
@@ -295,7 +318,7 @@ def get_board(force_fresh: bool = False):
                      else _au_shop(r.get("books"), False) if _sharp_call(r) else []),
             "history": _line_history(gd, r["Home Team"], r["Away Team"]),
         })
-    return cards, warn
+    return cards, warn, placed
 
 
 PAGE = r"""
@@ -408,6 +431,19 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
  {% if c.shop %}<details><summary>AU shop for {{(c.pick.team if c.pick else c.sharp_call.team)}} ({{c.shop|length}} books)</summary>
   <table><tr><th>Book</th><th class="num">Line</th><th class="num">Price</th></tr>
   {% for s in c.shop %}<tr><td>{{s.book}}</td><td class="num">{{'%+.1f'|format(s.point)}}</td><td class="num">{{'%.2f'|format(s.price) if s.price else '–'}}</td></tr>{% endfor %}</table></details>{% endif %}
+ {% if c.tshop %}<details><summary>Shop totals — best OVER {{'%.1f'|format(c.tshop.best_over.point)}} @ {{'%.2f'|format(c.tshop.best_over.over) if c.tshop.best_over.over else '–'}} {{c.tshop.best_over.book}} · best UNDER {{'%.1f'|format(c.tshop.best_under.point)}} @ {{'%.2f'|format(c.tshop.best_under.under) if c.tshop.best_under.under else '–'}} {{c.tshop.best_under.book}} ({{c.tshop.n}} AU books, {{'%.1f'|format(c.tshop.lo)}}–{{'%.1f'|format(c.tshop.hi)}})</summary>
+  <table><tr><th>Book</th><th class="num">Total</th><th class="num">Over</th><th class="num">Under</th></tr>
+  {% for s in c.tshop.rows %}<tr{% if s.sharp %} class="small"{% endif %}><td>{{s.book}}{% if s.sharp %} (sharp ref){% endif %}</td><td class="num">{{'%.1f'|format(s.point)}}</td>
+   <td class="num {{'ok' if s.best_over}}">{{'%.2f'|format(s.over) if s.over else '–'}}{{' ★' if s.best_over}}</td>
+   <td class="num {{'ok' if s.best_under}}">{{'%.2f'|format(s.under) if s.under else '–'}}{{' ★' if s.best_under}}</td></tr>{% endfor %}</table>
+  <div class="row">{% for sd in ['over','under'] %}{% set b = c.tshop['best_' ~ sd] %}{% if (c.home, c.away, sd) in placed %}<span class="taken">✓ already bet {{sd|upper}}</span>{% else %}
+   <form class="inline" method="post" action="{{url_for('quicklog')}}">
+    <input type="hidden" name="gdate" value="{{c.gd}}"><input type="hidden" name="home" value="{{c.home}}"><input type="hidden" name="away" value="{{c.away}}">
+    <input type="hidden" name="side" value="{{sd}}"><input type="hidden" name="model" value="shop_total"><input type="hidden" name="book" value="{{b.book}}">
+    {{sd|upper}} <input name="line" type="number" step="0.5" value="{{'%.1f'|format(b.point)}}" style="width:65px">
+    @<input name="odds" type="number" step="0.01" value="{{'%.2f'|format(b[sd]) if b[sd] else '1.90'}}" style="width:65px">
+    ×<input name="stake" type="number" step="1" min="1" value="10" style="width:55px"> <button>bet {{sd}} @ {{b.book}}</button></form>{% endif %}
+  {% endfor %}</div></details>{% endif %}
  {% if c.history %}<details><summary>Line history ({{c.history|length}} captures)</summary>
   <table><tr><th>Phase</th><th>When</th><th class="num">AU home pt</th><th class="num">Sharp home pt</th></tr>
   {% for hst in c.history %}<tr><td>{{hst.phase}}</td><td>{{hst.ts}}</td><td class="num">{{'%+.1f'|format(hst.au) if hst.au is not none else '–'}}</td><td class="num">{{'%+.1f'|format(hst.sharp) if hst.sharp is not none else '–'}}</td></tr>{% endfor %}</table></details>{% endif %}
@@ -496,7 +532,7 @@ POSITIONS = ["QB", "RB", "WR", "TE", "T", "G", "C", "DE", "DT", "LB", "CB", "S",
 
 @app.route("/")
 def index():
-    cards, warn = get_board()
+    cards, warn, placed = get_board()
     outs_df = db.read_outs()
     outs = []
     for _, o in outs_df.sort_values(["team", "points"], ascending=[True, False]).iterrows():
@@ -554,13 +590,13 @@ def index():
         lag=SHARP_LAG_MIN, blend=MARKET_BLEND, tsignal=TOTAL_SIGNAL, tlag=TOTAL_LAG_MIN,
         fav=FAV_EDGE, dog=DOG_EDGE, tu=TOTAL_UNDER_EDGE, to=TOTAL_OVER_EDGE, teams=sorted(TEAMS), positions=POSITIONS, outs=outs,
         watch=db.get_json("injury_watch", []), bets=bets, tally=tally(bets_df), bt=bt, coeffs=_coeffs(),
-        bank=bank, kelly=bk.kelly_fraction(), scorecards=scorecards,
+        bank=bank, kelly=bk.kelly_fraction(), scorecards=scorecards, placed=placed,
         au_book=(cards[0]["au_book"] if cards else "Sportsbet"), regions=ODDS_REGIONS, markets=ODDS_MARKETS)
 
 
 @app.route("/api/board")
 def api_board():
-    cards, warn = get_board()
+    cards, warn, _ = get_board()
     return jsonify({"warn": warn, "games": [{k: v for k, v in c.items() if k not in ("history",)} for c in cards]})
 
 
