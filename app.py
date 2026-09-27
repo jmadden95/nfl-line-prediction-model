@@ -450,26 +450,6 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
 </div>
 {% endfor %}
 
-<h2>Player outs (manual + ESPN)</h2>
-<div class="card">
- <form method="post" action="{{url_for('add_out')}}" class="row">
-  <select name="team" required><option value="">team…</option>{% for t in teams %}<option>{{t}}</option>{% endfor %}</select>
-  <input name="player" placeholder="player" required>
-  <select name="position">{% for p in positions %}<option>{{p}}</option>{% endfor %}</select>
-  <select name="kind"><option value="out">out</option><option value="in">returning (in)</option></select>
-  <input name="weeks" type="number" step="1" min="1" value="1" style="width:70px" title="weeks"> wk
-  <input name="points" type="number" step="0.1" placeholder="pts (blank = position default)" style="width:200px">
-  <button class="pri">Add</button>
-  <span class="small">QB = the starter (uses the learned coefficient); others add their points to the margin.</span>
- </form>
- {% if outs %}<table><tr><th>Team</th><th>Player</th><th>Pos</th><th class="num">Pts</th><th>Kind</th><th>Since</th><th class="num">Wks</th><th>Source</th><th>Note</th><th></th></tr>
- {% for o in outs %}<tr><td>{{o.team}}</td><td>{{o.player}}</td><td>{{o.position}}</td><td class="num">{{'%.2f'|format(o.points or 0)}}</td><td>{{o.kind}}</td><td>{{o.entered}}</td><td class="num">{{'%.0f'|format(o.weeks or 1)}}</td><td>{{o.source}}</td><td class="small">{{(o.note or '')[:70]}}</td>
-  <td><form class="inline" method="post" action="{{url_for('remove_out')}}"><input type="hidden" name="rowid" value="{{o.rowid}}"><button class="danger">×</button></form></td></tr>{% endfor %}</table>
- {% else %}<div class="small">No outs yet — click "Sync injuries".</div>{% endif %}
- {% if watch %}<details><summary>Questionable / watch-list ({{watch|length}})</summary><table>
-  {% for w in watch %}<tr><td>{{w.team}}</td><td>{{w.player}}</td><td>{{w.position}}</td><td>{{w.status}}</td><td class="small">{{w.detail}}</td></tr>{% endfor %}</table></details>{% endif %}
-</div>
-
 <h2>My bets</h2>
 <div class="card">
  <form method="post" action="{{url_for('add_bet')}}" class="row">
@@ -523,6 +503,26 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
 <h2>Model weights (line-free linear, latest fit)</h2>
 <div class="card small">{% for f,c in coeffs %}<span style="display:inline-block;margin:2px 12px 2px 0"><b>{{f}}</b> {{'%+.3f'|format(c)}}</span>{% else %}not fitted yet{% endfor %}
  <div style="margin-top:6px">backup_qb_diff is the learned cost of a backup QB starting (pts of margin); positive = the side with the starter gains.</div></div>
+<h2>Player outs (manual + ESPN)</h2>
+<div class="card">
+ <form method="post" action="{{url_for('add_out')}}" class="row">
+  <select name="team" required><option value="">team…</option>{% for t in teams %}<option>{{t}}</option>{% endfor %}</select>
+  <input name="player" placeholder="player" required>
+  <select name="position">{% for p in positions %}<option>{{p}}</option>{% endfor %}</select>
+  <select name="kind"><option value="out">out</option><option value="in">returning (in)</option></select>
+  <input name="weeks" type="number" step="1" min="1" value="1" style="width:70px" title="weeks"> wk
+  <input name="points" type="number" step="0.1" placeholder="pts (blank = position default)" style="width:200px">
+  <button class="pri">Add</button>
+  <span class="small">QB = the starter (uses the learned coefficient); others add their points to the margin.</span>
+ </form>
+ {% if outs %}<table><tr><th>Team</th><th>Player</th><th>Pos</th><th class="num">Pts</th><th>Kind</th><th>Since</th><th class="num">Wks</th><th>Source</th><th>Note</th><th></th></tr>
+ {% for o in outs %}<tr><td>{{o.team}}</td><td>{{o.player}}</td><td>{{o.position}}</td><td class="num">{{'%.2f'|format(o.points or 0)}}</td><td>{{o.kind}}</td><td>{{o.entered}}</td><td class="num">{{'%.0f'|format(o.weeks or 1)}}</td><td>{{o.source}}</td><td class="small">{{(o.note or '')[:70]}}</td>
+  <td><form class="inline" method="post" action="{{url_for('remove_out')}}"><input type="hidden" name="rowid" value="{{o.rowid}}"><button class="danger">×</button></form></td></tr>{% endfor %}</table>
+ {% else %}<div class="small">No outs yet — click "Sync injuries".</div>{% endif %}
+ {% if watch %}<details><summary>Questionable / watch-list ({{watch|length}})</summary><table>
+  {% for w in watch %}<tr><td>{{w.team}}</td><td>{{w.player}}</td><td>{{w.position}}</td><td>{{w.status}}</td><td class="small">{{w.detail}}</td></tr>{% endfor %}</table></details>{% endif %}
+</div>
+
 <div class="small" style="margin:18px 0">Analytics, not advice. AU regions: {{regions}} · markets: {{markets}}. Gambling Help Online 1800 858 858.</div>
 </div></body></html>
 """
