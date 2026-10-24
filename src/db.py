@@ -169,7 +169,16 @@ def capture_results(results: list) -> int:
                 continue
             g = snaps[(snaps["game_date"] == gd) & (snaps["home"] == r["home"])
                       & (snaps["away"] == r["away"])].sort_values("captured_ts") if len(snaps) else snaps
-            first = g.iloc[0] if len(g) else None
+            if len(g):   # pre-kickoff only (an in-play capture once poisoned a row)
+                ko = pd.to_datetime(g["kickoff"], format="mixed", errors="coerce")
+                ts = pd.to_datetime(g["captured_ts"], format="ISO8601", errors="coerce")
+                g = g[ko.isna() | (ts < ko)]
+                g = g[g["au_point"].notna()]
+            # OPEN = the Tuesday 'open' phase (the AU opener), else the first capture.
+            # The first capture is often a look-ahead line 8-10 days out, which is
+            # NOT the opener the 2006-2025 history is measured against.
+            op = g[g["phase"] == "open"] if len(g) else g
+            first = op.iloc[-1] if len(op) else (g.iloc[0] if len(g) else None)
             last = g.iloc[-1] if len(g) else None
             rows.append({
                 "Date": gd, "Home Team": r["home"], "Away Team": r["away"],

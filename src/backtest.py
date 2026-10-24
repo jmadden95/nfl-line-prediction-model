@@ -141,7 +141,7 @@ def rule_report() -> list:
         if res is None:
             continue
         r = {"name": name}
-        for lab, sm in (("train", season <= 2018), ("val", season >= 2019)):
+        for lab, sm in (("train", season <= 2018), ("val", (season >= 2019) & (season <= 2025)), ("fwd", season >= 2026)):
             sel = res[mask & sm.to_numpy()]
             dec = sel[sel != 0]
             r[f"{lab}_n"] = int(len(sel))
@@ -195,7 +195,8 @@ def run(verbose: bool = True) -> dict:
                   f"{c.get('cover', 0):>14.1%}{c.get('roi', 0):>12.1%}")
         for r in summary.get("rules", []):
             print(f"  RULE {r['name']:<40} train n={r['train_n']} cov {r['train_cover']:.1%} roi {r['train_roi']:+.1%} | "
-                  f"validate n={r['val_n']} cov {r['val_cover']:.1%} roi {r['val_roi']:+.1%}")
+                  f"validate n={r['val_n']} cov {r['val_cover']:.1%} roi {r['val_roi']:+.1%} | "
+                  f"2026 n={r['fwd_n']} cov {r['fwd_cover']:.1%} roi {r['fwd_roi']:+.1%}")
         m = summary["market"]
         print("\nMarket structure (workbook book: Pinnacle->bet365->Betr; open vs close):")
         print(f"  MAE open {m['mae_open']:.2f}  close {m['mae_close']:.2f}  (n={m['games']})")

@@ -13,7 +13,7 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 from config import (DATA_DIR, LOCAL_TZ, MARKET_BLEND, NFLVERSE_GAMES_CSV, NTFY_TOPIC, NTFY_URL,
                     ODDS_API_KEY, ODDS_MARKETS, ODDS_REGIONS, POSITION_POINTS, RAW_XLSX,
                     SHARP_LAG_MIN, SIGNAL_EDGE, TOTAL_LAG_MIN, TOTAL_SIGNAL, FAV_EDGE, DOG_EDGE,
-                    TOTAL_UNDER_EDGE, TOTAL_OVER_EDGE)
+                    TOTAL_UNDER_EDGE, TOTAL_OVER_EDGE, SOFT_SIGNALS_ENABLED)
 from src.signals import handicap_signal, total_signal
 from src import db
 from src import bankroll as bk
@@ -277,6 +277,8 @@ def get_board(force_fresh: bool = False):
             soft_tot_form = _tform(tgap < 0, r["au_total"], abs(tgap), "soft_total")
         soft_form = (_form("home" if soft["team"] == short(r["Home Team"]) else "away",
                            soft["line"], soft["gap"], "soft") if soft else None)
+        if not SOFT_SIGNALS_ENABLED:          # AU-soft = tracking only (no bet buttons)
+            soft_form = soft_tot_form = None
         for _frm in (pick_form, soft_form, tot_form, soft_tot_form):
             if _frm:
                 _frm["taken"] = (*_gk, _frm["side"]) in placed
@@ -387,15 +389,15 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
 <h2>Board — next {{show_days}} days · handicap: fav ≥ {{fav}} / dog ≥ {{dog}} · totals: under ≥ {{tu}} / over ≥ {{to}} (wind-aware) · soft when AU trails Pinnacle by ≥ {{lag}} (totals {{tlag}})</h2>
 {% if not cards %}<div class="card">No upcoming games to show.</div>{% endif %}
 {% for c in cards %}
-<div class="card {{'sig' if c.pick else ('zap' if c.sharp_call else '')}} {{'tsig' if (c.tot_pick or c.soft_tot) else ''}}">
+<div class="card {{'sig' if c.pick else ('zap' if (c.sharp_call and soft_on) else '')}} {{'tsig' if (c.tot_pick or c.soft_tot) else ''}}">
  <div class="hdr">
   <div>{% if c.my_bets %}<span class="taken">✓ on: {{c.my_bets|join(', ')}}</span> {% endif %}<span class="teams">{{c.a}} @ {{c.h}}</span> <span class="kick">{{c.kick}} AU · {{c.n_au}} AU books / {{c.n_books}} total</span></div>
   <div>
    {% if c.pick %}<span class="bet">BET {{c.pick.team}} {{'%+.1f'|format(c.pick.line)}} @ {{c.au_book}} {{'%.2f'|format(c.pick.odds) if c.pick.odds else ''}} · edge {{'%.1f'|format(c.pick.edge)}} · cover {{'%.0f'|format(c.cover*100)}}%</span>
    {% else %}<span class="nobet">no model bet (edge {{'%+.1f'|format(c.edge) if c.edge==c.edge else '–'}})</span>{% endif %}
-   {% if c.sharp_call %} <span class="soft">AU SOFT: {{c.sharp_call.team}} {{'%+.1f'|format(c.sharp_call.line)}} ({{'%+.1f'|format(c.sharp_call.gap)}} vs sharp)</span>{% endif %}
+   {% if c.sharp_call %} <span class="soft" {% if not soft_on %}style="opacity:.55" title="tracking only — not a bet signal (forward 2026: 42% cover)"{% endif %}>AU SOFT{{'' if soft_on else ' (track)'}}: {{c.sharp_call.team}} {{'%+.1f'|format(c.sharp_call.line)}} ({{'%+.1f'|format(c.sharp_call.gap)}} vs sharp)</span>{% endif %}
    {% if c.tot_pick %} <span class="bet">TOTAL: {{c.tot_pick.side|upper}} {{'%.1f'|format(c.tot_pick.line)}} · edge {{'%.1f'|format(c.tot_pick.edge)}}</span>{% endif %}
-   {% if c.soft_tot %} <span class="soft">AU SOFT TOTAL: {{c.soft_tot.side|upper}} {{'%.1f'|format(c.soft_tot.line)}} ({{'%+.1f'|format(c.soft_tot.gap)}} vs sharp)</span>{% endif %}
+   {% if c.soft_tot %} <span class="soft" {% if not soft_on %}style="opacity:.55"{% endif %}>AU SOFT TOTAL{{'' if soft_on else ' (track)'}}: {{c.soft_tot.side|upper}} {{'%.1f'|format(c.soft_tot.line)}} ({{'%+.1f'|format(c.soft_tot.gap)}} vs sharp)</span>{% endif %}
   </div>
  </div>
  {% for f in [c.pick_form, c.soft_form, c.tot_form, c.soft_tot_form] if f %}
@@ -496,9 +498,10 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
 </div>
 
 {% if bt and bt.rules %}<h2>Live signal rules — walk-forward, chosen on 2012-18, checked on 2019-25</h2>
-<div class="card"><table><tr><th>Rule</th><th class="num">train n</th><th class="num">train cover</th><th class="num">train ROI</th><th class="num">validate n</th><th class="num">validate cover</th><th class="num">validate ROI</th></tr>
-{% for r in bt.rules %}<tr><td>{{r.name}}</td><td class="num">{{r.train_n}}</td><td class="num">{{'%.1f'|format(r.train_cover*100)}}%</td><td class="num">{{'%+.1f'|format(r.train_roi*100)}}%</td><td class="num">{{r.val_n}}</td><td class="num">{{'%.1f'|format(r.val_cover*100)}}%</td><td class="num {{'ok' if r.val_roi>0 else 'bad'}}">{{'%+.1f'|format(r.val_roi*100)}}%</td></tr>{% endfor %}</table>
-<div class="small" style="margin-top:6px">Settled at 1.91 vs the workbook OPENING line (Pinnacle/bet365/Betr). Edges shrink by kickoff — bet early, judge live by CLV.</div></div>{% endif %}
+<div class="card"><table><tr><th>Rule</th><th class="num">train n</th><th class="num">train cover</th><th class="num">train ROI</th><th class="num">validate n</th><th class="num">validate cover</th><th class="num">validate ROI</th><th class="num">2026 n</th><th class="num">2026 cover</th><th class="num">2026 ROI</th></tr>
+{% for r in bt.rules %}<tr><td>{{r.name}}</td><td class="num">{{r.train_n}}</td><td class="num">{{'%.1f'|format(r.train_cover*100)}}%</td><td class="num">{{'%+.1f'|format(r.train_roi*100)}}%</td><td class="num">{{r.val_n}}</td><td class="num">{{'%.1f'|format(r.val_cover*100)}}%</td><td class="num {{'ok' if r.val_roi>0 else 'bad'}}">{{'%+.1f'|format(r.val_roi*100)}}%</td>
+<td class="num">{{r.fwd_n if r.fwd_n is defined else '–'}}</td><td class="num">{{'%.1f'|format(r.fwd_cover*100) ~ '%' if r.fwd_cover is defined else '–'}}</td><td class="num {{'ok' if (r.fwd_roi or 0)>0 else 'bad'}}">{{'%+.1f'|format(r.fwd_roi*100) ~ '%' if r.fwd_roi is defined else '–'}}</td></tr>{% endfor %}</table>
+<div class="small" style="margin-top:6px">Settled at 1.91 vs the OPENING line (workbook Pinnacle/bet365/Betr to 2025; our captured Tuesday Sportsbet open for 2026). 2026 = live season, not used to pick the rules — too few games to judge yet. Edges shrink by kickoff — bet early, judge live by CLV.</div></div>{% endif %}
 
 <h2>Model weights (line-free linear, latest fit)</h2>
 <div class="card small">{% for f,c in coeffs %}<span style="display:inline-block;margin:2px 12px 2px 0"><b>{{f}}</b> {{'%+.3f'|format(c)}}</span>{% else %}not fitted yet{% endfor %}
@@ -588,7 +591,7 @@ def index():
     return render_template_string(
         PAGE, st=_status(), warn=warn, cards=cards, show_days=SHOW_DAYS, signal=SIGNAL_EDGE,
         lag=SHARP_LAG_MIN, blend=MARKET_BLEND, tsignal=TOTAL_SIGNAL, tlag=TOTAL_LAG_MIN,
-        fav=FAV_EDGE, dog=DOG_EDGE, tu=TOTAL_UNDER_EDGE, to=TOTAL_OVER_EDGE, teams=sorted(TEAMS), positions=POSITIONS, outs=outs,
+        fav=FAV_EDGE, dog=DOG_EDGE, tu=TOTAL_UNDER_EDGE, to=TOTAL_OVER_EDGE, soft_on=SOFT_SIGNALS_ENABLED, teams=sorted(TEAMS), positions=POSITIONS, outs=outs,
         watch=db.get_json("injury_watch", []), bets=bets, tally=tally(bets_df), bt=bt, coeffs=_coeffs(),
         bank=bank, kelly=bk.kelly_fraction(), scorecards=scorecards, placed=placed,
         au_book=(cards[0]["au_book"] if cards else "Sportsbet"), regions=ODDS_REGIONS, markets=ODDS_MARKETS)

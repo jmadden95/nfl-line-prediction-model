@@ -107,6 +107,10 @@ TOTAL_UNDER_EDGE = 2.0      # model total below the AU total by this -> UNDER
 TOTAL_OVER_EDGE = 3.0       # model total above the AU total by this -> OVER
 TOTAL_SIGNAL = TOTAL_OVER_EDGE   # legacy name
 TOTAL_LAG_MIN = 1.5         # AU total vs sharp total gap (pts) that flags a soft total
+# AU-soft (AU book trails Pinnacle) is TRACKING ONLY: no bet forms, no alerts. Forward
+# 2026 wk2-7: 26 signals, 42% cover, median CLV 0.0 — Sportsbet does not lag Pinnacle
+# in a bettable way. Still captured + scored; flip on via env if the scorecard turns.
+SOFT_SIGNALS_ENABLED = os.getenv("SOFT_SIGNALS_ENABLED", "0") == "1"
 RANDOM_SEED = 42
 TEST_SEASONS = [2025]       # NFL season = the year it STARTS (2025 = Sep 2025-Feb 2026)
 TRAIN_FROM_SEASON = 2008    # 2 warm-up seasons for form/Elo before training rows

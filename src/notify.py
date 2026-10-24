@@ -66,9 +66,13 @@ def alert_line_moves(threshold: float = None) -> int:
 
 
 def alert_sharp_lags(events: list) -> int:
-    """For each game: every AU book whose handicap trails the sharp line by
+    """Disabled unless config.SOFT_SIGNALS_ENABLED (forward 2026 showed no edge).
+    For each game: every AU book whose handicap trails the sharp line by
     >= SHARP_LAG_MIN. Positive (au_point - sharp_point) means the AU book gives
     the HOME side more points than the sharps do -> back HOME at that book."""
+    from config import SOFT_SIGNALS_ENABLED
+    if not SOFT_SIGNALS_ENABLED:
+        return 0
     sent = 0
     for e in events or []:
         sp = e.get("sharp_point")
