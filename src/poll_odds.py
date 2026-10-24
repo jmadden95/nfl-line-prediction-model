@@ -36,7 +36,6 @@ def run(phase: str) -> None:
         print(f"poll {phase}: alert check failed ({ex})")
     try:
         from src.live import predict_upcoming
-        from src.notify import alert_bet_signals
         up = predict_upcoming(events)
         try:
             from src.features import build_features
@@ -46,7 +45,9 @@ def run(phase: str) -> None:
         except Exception as ex:  # noqa: BLE001
             print(f"poll {phase}: totals failed ({ex})")
         db.snapshot_predictions(up, phase=phase)
-        print(f"poll {phase}: {alert_bet_signals(up)} bet-signal alert(s)")
+        from src import strategies as strat
+        pk = strat.apply_to_board(up)
+        print(f"poll {phase}: {strat.alert_headline(up, pk)} strategy alert(s) (headline only)")
     except Exception as ex:  # noqa: BLE001
         print(f"poll {phase}: prediction/bet-signal failed ({ex})")
 

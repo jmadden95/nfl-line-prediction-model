@@ -15,6 +15,7 @@ from config import (DATA_DIR, LOCAL_TZ, MARKET_BLEND, NFLVERSE_GAMES_CSV, NTFY_T
                     SHARP_LAG_MIN, SIGNAL_EDGE, TOTAL_LAG_MIN, TOTAL_SIGNAL, FAV_EDGE, DOG_EDGE,
                     TOTAL_UNDER_EDGE, TOTAL_OVER_EDGE, SOFT_SIGNALS_ENABLED)
 from src.signals import handicap_signal, total_signal
+from src import strategies as strat
 from src import db
 from src import bankroll as bk
 from src.bets import settle_bets, signal_scorecards, tally
@@ -212,6 +213,10 @@ def get_board(force_fresh: bool = False):
     except Exception:  # noqa: BLE001
         pass
     horizon = _now() + pd.Timedelta(days=SHOW_DAYS)
+    try:
+        strat_picks = strat.apply_to_board(up)          # records first flags for every strategy
+    except Exception:  # noqa: BLE001
+        strat_picks = {}
     bank = None
     try:
         bank = bk.current()
@@ -277,12 +282,24 @@ def get_board(force_fresh: bool = False):
             soft_tot_form = _tform(tgap < 0, r["au_total"], abs(tgap), "soft_total")
         soft_form = (_form("home" if soft["team"] == short(r["Home Team"]) else "away",
                            soft["line"], soft["gap"], "soft") if soft else None)
-        if not SOFT_SIGNALS_ENABLED:          # AU-soft = tracking only (no bet buttons)
-            soft_form = soft_tot_form = None
-        for _frm in (pick_form, soft_form, tot_form, soft_tot_form):
-            if _frm:
-                _frm["taken"] = (*_gk, _frm["side"]) in placed
+        # Only the two HEADLINE strategies get bet buttons; everything else is tracked.
+        soft_form = soft_tot_form = pick_form = tot_form = None
+        game_picks = strat_picks.get((gd, r["Home Team"], r["Away Team"]), [])
+        head_forms, tracking = [], []
+        for pk in game_picks:
+            meta = strat.STRATEGIES[pk["strategy"]]
+            team = {"home": short(r["Home Team"]), "away": short(r["Away Team"])}.get(pk["side"], pk["side"].upper())
+            odds = pk["odds"] or 1.91
+            if meta["headline"]:
+                head_forms.append({"side": pk["side"], "line": pk["line"], "odds": odds, "book": pk["book"],
+                                   "stake": bk.kelly_stake(0.05, odds, bank_total), "model": pk["strategy"],
+                                   "label": meta["label"], "team": team, "note": pk["note"], "market": pk["market"],
+                                   "taken": (*_gk, pk["side"]) in placed})
+            else:
+                tracking.append(f"{meta['label'].split(' (')[0]}: {team} {pk['line']:+.1f}" if pk["market"] == "hcap"
+                                else f"{meta['label'].split(' (')[0]}: {team} {pk['line']:.1f}")
         cards.append({
+            "head_forms": head_forms, "tracking": tracking,
             "my_bets": my_bets.get(_gk, []),
             "tshop": _totals_shop(books),
             "pick_form": pick_form, "soft_form": soft_form, "tot_pick": tot_pick, "tot_form": tot_form,
@@ -386,34 +403,33 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
   {% for v,l in [(1,'full Kelly'),(0.5,'½ Kelly'),(0.25,'¼ Kelly'),(0.125,'⅛ Kelly')] %}<option value="{{v}}" {{'selected' if (kelly-v)|abs < 0.01}}>{{l}}</option>{% endfor %}</select></form>
 </div>
 
-<h2>Board — next {{show_days}} days · handicap: fav ≥ {{fav}} / dog ≥ {{dog}} · totals: under ≥ {{tu}} / over ≥ {{to}} (wind-aware) · soft when AU trails Pinnacle by ≥ {{lag}} (totals {{tlag}})</h2>
+<h2>Board — next {{show_days}} days · two live strategies</h2>
+<div class="card small" style="display:flex;gap:18px;flex-wrap:wrap">{% for s in headline %}<div><b>{{s.label}}</b> — {{s.blurb}}</div>{% endfor %}<div style="color:var(--mut)">Model line, Pinnacle gap and the other signals are still computed and tracked below; they just don't get a button until their record earns one.</div></div>
 {% if not cards %}<div class="card">No upcoming games to show.</div>{% endif %}
 {% for c in cards %}
-<div class="card {{'sig' if c.pick else ('zap' if (c.sharp_call and soft_on) else '')}} {{'tsig' if (c.tot_pick or c.soft_tot) else ''}}">
+<div class="card {{'sig' if c.head_forms else ''}}">
  <div class="hdr">
   <div>{% if c.my_bets %}<span class="taken">✓ on: {{c.my_bets|join(', ')}}</span> {% endif %}<span class="teams">{{c.a}} @ {{c.h}}</span> <span class="kick">{{c.kick}} AU · {{c.n_au}} AU books / {{c.n_books}} total</span></div>
   <div>
-   {% if c.pick %}<span class="bet">BET {{c.pick.team}} {{'%+.1f'|format(c.pick.line)}} @ {{c.au_book}} {{'%.2f'|format(c.pick.odds) if c.pick.odds else ''}} · edge {{'%.1f'|format(c.pick.edge)}} · cover {{'%.0f'|format(c.cover*100)}}%</span>
-   {% else %}<span class="nobet">no model bet (edge {{'%+.1f'|format(c.edge) if c.edge==c.edge else '–'}})</span>{% endif %}
-   {% if c.sharp_call %} <span class="soft" {% if not soft_on %}style="opacity:.55" title="tracking only — not a bet signal (forward 2026: 42% cover)"{% endif %}>AU SOFT{{'' if soft_on else ' (track)'}}: {{c.sharp_call.team}} {{'%+.1f'|format(c.sharp_call.line)}} ({{'%+.1f'|format(c.sharp_call.gap)}} vs sharp)</span>{% endif %}
-   {% if c.tot_pick %} <span class="bet">TOTAL: {{c.tot_pick.side|upper}} {{'%.1f'|format(c.tot_pick.line)}} · edge {{'%.1f'|format(c.tot_pick.edge)}}</span>{% endif %}
-   {% if c.soft_tot %} <span class="soft" {% if not soft_on %}style="opacity:.55"{% endif %}>AU SOFT TOTAL{{'' if soft_on else ' (track)'}}: {{c.soft_tot.side|upper}} {{'%.1f'|format(c.soft_tot.line)}} ({{'%+.1f'|format(c.soft_tot.gap)}} vs sharp)</span>{% endif %}
+   {% for f in c.head_forms %}<span class="bet">{{f.label|upper}}: {{f.team}} {{('%+.1f' if f.market=='hcap' else '%.1f')|format(f.line)}} @ {{f.book}} {{'%.2f'|format(f.odds)}}</span> {% endfor %}
+   {% if not c.head_forms %}<span class="nobet">no strategy bet{% if c.tracking %} · tracking {{c.tracking|length}}{% endif %}</span>{% endif %}
   </div>
  </div>
- {% for f in [c.pick_form, c.soft_form, c.tot_form, c.soft_tot_form] if f %}
- {% if f.taken %}<div class="row quick"><span class="small">{{f.model|replace('_',' ')}} · {{f.team}}</span> <span class="taken">✓ already bet {{f.team}}</span></div>{% else %}
+ {% for f in c.head_forms %}
+ {% if f.taken %}<div class="row quick"><span class="small">{{f.label}} · {{f.team}}</span> <span class="taken">✓ already bet {{f.team}}</span></div>{% else %}
  <form class="row quick" method="post" action="{{url_for('quicklog')}}">
   <input type="hidden" name="gdate" value="{{c.gd}}"><input type="hidden" name="home" value="{{c.home}}"><input type="hidden" name="away" value="{{c.away}}">
   <input type="hidden" name="side" value="{{f.side}}"><input type="hidden" name="model" value="{{f.model}}">
-  <span class="small">{{f.model|replace('_',' ')}} · {{f.team}}</span>
+  <span class="small"><b>{{f.label}}</b> · {{f.team}} <span title="{{f.note}}">ⓘ</span></span>
   <input name="line" type="number" step="0.5" value="{{'%.1f'|format(f.line)}}" style="width:70px" title="line">
   @<input name="odds" type="number" step="0.01" value="{{'%.2f'|format(f.odds)}}" style="width:70px" title="price">
-  ×<input name="stake" type="number" step="1" min="1" value="{{f.stake or 1}}" style="width:60px" title="stake (Kelly suggestion)">
-  <input name="book" value="{{f.book}}" style="width:110px" title="book">
+  ×<input name="stake" type="number" step="1" min="1" value="{{f.stake or 1}}" style="width:60px" title="stake (¼-Kelly at a 5% assumed edge)">
+  <input name="book" value="{{f.book}}" style="width:120px" title="book">
   <button class="pri">bet</button>
-  <span class="small">EV {{'%+.1f'|format(f.ev*100)}}%{% if f.stake %} · Kelly {{f.stake}}{% else %} · set a bankroll for Kelly{% endif %}</span>
+  <span class="small">{{f.note}}</span>
  </form>{% endif %}
  {% endfor %}
+ {% if c.tracking %}<div class="small" style="margin-top:4px;color:var(--mut)">tracking (no bet): {{c.tracking|join(' · ')}}</div>{% endif %}
  <div class="grid">
   <div><div class="k">{{c.au_book}} line</div><div class="v">{{c.au}} <span class="small">{{c.au_odds}}</span></div></div>
   <div><div class="k">{{c.sharp_book}} line</div><div class="v">{% if c.gap==c.gap %}{{c.sharp}} <span class="small">gap {{'%+.1f'|format(c.gap)}}</span><div class="small">{{c.sharp_detail}}</div>{% else %}<span class="small">no sharp line yet</span>{% endif %}</div></div>
@@ -473,12 +489,13 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
  {% else %}<div class="small">No bets logged.</div>{% endif %}
 </div>
 
-<h2>Signal scorecard — every flagged signal, taken or not</h2>
+<h2>Strategy performance — every first flag since launch, bet or not</h2>
 <div class="card">
- {% if scorecards %}<table><tr><th>Signal</th><th class="num">n</th><th class="num">avg CLV (pts)</th><th class="num">beat close</th><th class="num">settled</th><th class="num">cover</th><th class="num">ROI @1.91</th></tr>
- {% for sc in scorecards %}<tr><td>{{sc.label}}</td><td class="num">{{sc.n}}</td><td class="num {{'ok' if sc.pos else 'bad'}}">{{sc.avg_clv}}</td><td class="num">{{sc.beat}}</td><td class="num">{{sc.settled or '–'}}</td><td class="num">{{sc.cover or '–'}}</td><td class="num">{{sc.roi or '–'}}</td></tr>{% endfor %}</table>
- <div class="small" style="margin-top:6px">CLV = the pick's AU line at the first flag vs the last AU capture (positive = the line moved toward the pick). Cover/ROI once results land. This is the unbiased read on both the model and the "AU is soft" thesis.</div>
- {% else %}<div class="small">Needs at least two captures per game (first poll vs close). Accumulates from the first cron poll.</div>{% endif %}
+ <table><tr><th>Strategy</th><th class="num">flags</th><th class="num">settled</th><th class="num">W-L</th><th class="num">cover</th><th class="num">ROI</th><th class="num">median CLV</th><th class="num">beat close</th></tr>
+ {% for s in strat_table %}<tr{% if s.headline %} style="font-weight:600"{% endif %}><td>{{'★ ' if s.headline}}{{s.label}}</td><td class="num">{{s.n}}</td>
+  {% if s.n %}<td class="num">{{s.settled}}</td><td class="num">{{s.w}}-{{s.l}}</td><td class="num">{{'%.0f'|format((s.cover or 0)*100)}}%</td><td class="num {{'ok' if (s.roi or 0)>0 else 'bad'}}">{{'%+.1f'|format((s.roi or 0)*100)}}%</td><td class="num">{{'%+.2f'|format(s.clv_med) if s.clv_med is not none else '–'}}</td><td class="num">{{'%.0f'|format((s.beat or 0)*100)}}%</td>
+  {% else %}<td class="num" colspan="6">no flags yet</td>{% endif %}</tr>{% endfor %}</table>
+ <div class="small" style="margin-top:6px">Each strategy is recorded the first time it fires for a game (pre-kickoff), at that line, price and book. ROI at the logged price. CLV vs the AU-consensus close (positive = the market moved toward the pick). ★ = live with bet buttons; a background strategy earns a button when its record justifies it.</div>
 </div>
 
 <h2>Backtest &amp; market structure</h2>
@@ -582,6 +599,10 @@ def index():
         scorecards = signal_scorecards()
     except Exception:  # noqa: BLE001
         scorecards = []
+    try:
+        strat_table = strat.strategy_scorecard()
+    except Exception:  # noqa: BLE001
+        strat_table = []
     bt = None
     try:
         p = DATA_DIR / "backtest_summary.json"
@@ -594,6 +615,7 @@ def index():
         fav=FAV_EDGE, dog=DOG_EDGE, tu=TOTAL_UNDER_EDGE, to=TOTAL_OVER_EDGE, soft_on=SOFT_SIGNALS_ENABLED, teams=sorted(TEAMS), positions=POSITIONS, outs=outs,
         watch=db.get_json("injury_watch", []), bets=bets, tally=tally(bets_df), bt=bt, coeffs=_coeffs(),
         bank=bank, kelly=bk.kelly_fraction(), scorecards=scorecards, placed=placed,
+        strat_table=strat_table, headline=[m for m in strat.STRATEGIES.values() if m["headline"]],
         au_book=(cards[0]["au_book"] if cards else "Sportsbet"), regions=ODDS_REGIONS, markets=ODDS_MARKETS)
 
 
