@@ -112,6 +112,30 @@ def _au_shop_totals(books, over: bool):
     return sorted(rows, key=lambda x: ((x["point"] if over else -x["point"]), -(x["price"] or 0)))
 
 
+def _lines_shop(books, home, away):
+    """Every AU book's handicap for BOTH sides (+ Pinnacle reference). Best = most
+    points for that side, then best price. Flags a book 1+ pt off the AU consensus."""
+    rows = []
+    for b in books or []:
+        if b.get("sp_point") is None or not (b.get("region") == "au" or b.get("sharp")):
+            continue
+        rows.append({"book": b["title"], "home_pt": float(b["sp_point"]), "away_pt": -float(b["sp_point"]),
+                     "home_px": b.get("sp_home"), "away_px": b.get("sp_away"),
+                     "sharp": bool(b.get("sharp")) and b.get("region") != "au"})
+    au = [x for x in rows if not x["sharp"]]
+    if not au:
+        return None
+    cons = float(np.median([x["home_pt"] for x in au]))
+    bh = max(au, key=lambda x: (x["home_pt"], x["home_px"] or 0))
+    ba = max(au, key=lambda x: (x["away_pt"], x["away_px"] or 0))
+    for x in rows:
+        x["best_home"], x["best_away"] = x is bh, x is ba
+        x["outlier"] = abs(x["home_pt"] - cons) >= 1.0 and not x["sharp"]
+    return {"rows": sorted(rows, key=lambda x: (x["sharp"], -x["home_pt"], x["book"])), "best_home": bh, "best_away": ba,
+            "cons": cons, "n": len(au), "h": short(home), "a": short(away),
+            "spread": max(x["home_pt"] for x in au) - min(x["home_pt"] for x in au)}
+
+
 def _totals_shop(books):
     """Every AU book's total (+ Pinnacle for reference). Best OVER = lowest line then
     best price; best UNDER = highest line then best price."""
@@ -301,7 +325,7 @@ def get_board(force_fresh: bool = False):
         cards.append({
             "head_forms": head_forms, "tracking": tracking,
             "my_bets": my_bets.get(_gk, []),
-            "tshop": _totals_shop(books),
+            "tshop": _totals_shop(books), "lshop": _lines_shop(books, r["Home Team"], r["Away Team"]),
             "pick_form": pick_form, "soft_form": soft_form, "tot_pick": tot_pick, "tot_form": tot_form,
             "soft_tot": soft_tot, "soft_tot_form": soft_tot_form, "sharp_total": r.get("sharp_total"),
             "wx": ("enclosed" if r.get("enclosed") in (True, 1) else
@@ -332,9 +356,6 @@ def get_board(force_fresh: bool = False):
             "bk_away": r.get("backup_qb_away"), "qb_coef": r.get("qb_coef"),
             "au_total": r.get("au_total"), "pred_total": r.get("pred_total"), "t_edge": t_edge,
             "n_au": r.get("n_au_books"), "n_books": r.get("n_books"),
-            "shop": _au_shop(r.get("books"), pick["side"] == "home") if pick else
-                    (_au_shop(r.get("books"), True) if _sharp_call(r) and _sharp_call(r)["team"] == short(r["Home Team"])
-                     else _au_shop(r.get("books"), False) if _sharp_call(r) else []),
             "history": _line_history(gd, r["Home Team"], r["Away Team"]),
         })
     return cards, warn, placed
@@ -446,9 +467,19 @@ button.pri{background:#1f4d2e;border-color:var(--ok)}button.danger{background:#3
   {% for o in c.away_outs %}{% if o.qb %}<span class="qb">{{o.player}} (QB starter → model {{'%+.1f'|format(-c.qb_coef)}})</span>{% else %}{{o.player}} {{o.position}} {{'%+.1f'|format(-o.points)}}{% endif %}{{', ' if not loop.last}}{% else %}none{% endfor %}
   &nbsp;·&nbsp; net to home margin {{'%+.1f'|format(c.out_diff)}}
  </div>
- {% if c.shop %}<details><summary>AU shop for {{(c.pick.team if c.pick else c.sharp_call.team)}} ({{c.shop|length}} books)</summary>
-  <table><tr><th>Book</th><th class="num">Line</th><th class="num">Price</th></tr>
-  {% for s in c.shop %}<tr><td>{{s.book}}</td><td class="num">{{'%+.1f'|format(s.point)}}</td><td class="num">{{'%.2f'|format(s.price) if s.price else '–'}}</td></tr>{% endfor %}</table></details>{% endif %}
+ {% if c.lshop %}<details><summary>Shop lines — best {{c.lshop.h}} {{'%+.1f'|format(c.lshop.best_home.home_pt)}} @ {{'%.2f'|format(c.lshop.best_home.home_px) if c.lshop.best_home.home_px else '–'}} {{c.lshop.best_home.book}} · best {{c.lshop.a}} {{'%+.1f'|format(c.lshop.best_away.away_pt)}} @ {{'%.2f'|format(c.lshop.best_away.away_px) if c.lshop.best_away.away_px else '–'}} {{c.lshop.best_away.book}} ({{c.lshop.n}} AU books, consensus {{'%+.1f'|format(c.lshop.cons)}}{% if c.lshop.spread >= 1 %}, {{'%.1f'|format(c.lshop.spread)}}-pt range{% endif %})</summary>
+  <table><tr><th>Book</th><th class="num">{{c.lshop.h}}</th><th class="num">price</th><th class="num">{{c.lshop.a}}</th><th class="num">price</th></tr>
+  {% for s in c.lshop.rows %}<tr{% if s.sharp %} class="small"{% endif %}><td>{{s.book}}{% if s.sharp %} (sharp ref){% endif %}{% if s.outlier %} <span class="warn" title="1+ pt off the AU consensus">◆ outlier</span>{% endif %}</td>
+   <td class="num {{'ok' if s.best_home}}">{{'%+.1f'|format(s.home_pt)}}{{' ★' if s.best_home}}</td><td class="num">{{'%.2f'|format(s.home_px) if s.home_px else '–'}}</td>
+   <td class="num {{'ok' if s.best_away}}">{{'%+.1f'|format(s.away_pt)}}{{' ★' if s.best_away}}</td><td class="num">{{'%.2f'|format(s.away_px) if s.away_px else '–'}}</td></tr>{% endfor %}</table>
+  <div class="row">{% for sd in ['home','away'] %}{% set b = c.lshop['best_' ~ sd] %}{% set tm = c.lshop.h if sd=='home' else c.lshop.a %}{% if (c.home, c.away, sd) in placed %}<span class="taken">✓ already bet {{tm}}</span>{% else %}
+   <form class="inline" method="post" action="{{url_for('quicklog')}}">
+    <input type="hidden" name="gdate" value="{{c.gd}}"><input type="hidden" name="home" value="{{c.home}}"><input type="hidden" name="away" value="{{c.away}}">
+    <input type="hidden" name="side" value="{{sd}}"><input type="hidden" name="model" value="shop_line"><input type="hidden" name="book" value="{{b.book}}">
+    {{tm}} <input name="line" type="number" step="0.5" value="{{'%+.1f'|format(b[sd ~ '_pt'])}}" style="width:65px">
+    @<input name="odds" type="number" step="0.01" value="{{'%.2f'|format(b[sd ~ '_px']) if b[sd ~ '_px'] else '1.90'}}" style="width:65px">
+    ×<input name="stake" type="number" step="1" min="1" value="10" style="width:55px"> <button>bet {{tm}} @ {{b.book}}</button></form>{% endif %}
+  {% endfor %}</div></details>{% endif %}
  {% if c.tshop %}<details><summary>Shop totals — best OVER {{'%.1f'|format(c.tshop.best_over.point)}} @ {{'%.2f'|format(c.tshop.best_over.over) if c.tshop.best_over.over else '–'}} {{c.tshop.best_over.book}} · best UNDER {{'%.1f'|format(c.tshop.best_under.point)}} @ {{'%.2f'|format(c.tshop.best_under.under) if c.tshop.best_under.under else '–'}} {{c.tshop.best_under.book}} ({{c.tshop.n}} AU books, {{'%.1f'|format(c.tshop.lo)}}–{{'%.1f'|format(c.tshop.hi)}})</summary>
   <table><tr><th>Book</th><th class="num">Total</th><th class="num">Over</th><th class="num">Under</th></tr>
   {% for s in c.tshop.rows %}<tr{% if s.sharp %} class="small"{% endif %}><td>{{s.book}}{% if s.sharp %} (sharp ref){% endif %}</td><td class="num">{{'%.1f'|format(s.point)}}</td>
